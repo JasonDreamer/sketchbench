@@ -1,0 +1,9 @@
+{
+  "name": "sketchbench",
+  "private": true,
+  "workspaces": ["app/ui", "packages/runtime"],
+  "scripts": {
+    "ui:build": "npm run build -w app/ui",
+    "ui:dev": "npm run dev -w app/ui"
+  }
+}

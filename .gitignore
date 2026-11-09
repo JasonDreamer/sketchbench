@@ -3,3 +3,7 @@ target/
 phase0/results/
 node_modules/
 phase0/gen/
+.dev-workspace/
+app/ui/dist/
+app/target/
+app/gen/

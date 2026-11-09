@@ -1,0 +1,3 @@
+# 作品ごとのキャッシュと書き出し先
+works/*/.cache/
+works/*/renders/

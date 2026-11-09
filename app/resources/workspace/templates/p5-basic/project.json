@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "width": 1920,
+  "height": 1080,
+  "fps": [30, 1],
+  "duration": 300,
+  "seed": 1,
+  "layers": [
+    {
+      "id": "L1",
+      "sketch": "sketches/main",
+      "start": 0,
+      "end": 300,
+      "offset": 0,
+      "speed": 1,
+      "blend": "normal",
+      "opacity": 1,
+      "params": {}
+    }
+  ],
+  "markers": [],
+  "eventMap": {}
+}

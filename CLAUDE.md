@@ -5,8 +5,9 @@
 
 ## 進め方
 - `docs/design.md` の「開発フェーズ」の順に作る。各フェーズの完了条件を満たすまで次へ進まない。
-- 今はフェーズ0(技術検証)。「先に検証する技術リスク」表の9項目を試作で確かめ、計測値と採否を `docs/phase0-results.md` に記録し、結果に応じて design.md の該当箇所を確定させる。
-- ブラウザ側だけで測れる項目は `bench/index.html`(受信側は `node bench/server.mjs`)で先に測る。共有メモリ、cpal、WebView2起動引数はTauriの最小アプリで測る。
+- 今はフェーズ1(最小ループ)。フェーズ0の結果は `docs/phase0-results.md`、試作は `phase0/`(本体からは参照しない)。
+- アプリ本体は `app/`(Rustコア、`app/ui` がUI)、ランタイムは `packages/runtime`(`@sketchbench/runtime`)。ランタイムのTSはRustコアがOxcで変換して配信する。
+- 開発中の作業フォルダは環境変数 `SB_WORKSPACE` で指定する(既定は `%USERPROFILE%\Documents\Sketchbench`)。リポジトリ内で試すときは `.dev-workspace/`(gitに入れない)を使う。
 
 ## 守ること
 - 独自言語は作らない。スケッチはTypeScriptと既存ライブラリ、ランタイムAPIは薄く保つ。

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sketchbench",
+  "version": "0.1.0",
+  "identifier": "dev.sketchbench.app",
+  "build": { "frontendDist": "ui/dist" },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.ico"] }
+}
