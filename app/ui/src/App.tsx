@@ -93,7 +93,7 @@ export function App() {
 
     // ショートカット。プレビュー(別のWebView)で押されたキーもRust経由でここに届く
     const shortcut = (k: { code: string; key: string; shift: boolean }) => {
-      if (k.code === "Space") togglePlay();
+      if (k.code === "Space" || k.key === " ") togglePlay();
       else if (k.key === "ArrowLeft" || k.key === "ArrowRight")
         invoke("seek", { frame: currentFrame() + (k.key === "ArrowLeft" ? -1 : 1) * (k.shift ? 10 : 1) });
       else if (k.key === "Home") invoke("seek", { frame: 0 });

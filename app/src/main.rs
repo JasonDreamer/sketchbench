@@ -146,7 +146,8 @@ fn main() {
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
-                    let opt = export::ExportOptions { work, format, from: None, to: None };
+                    let order = args.iter().position(|a| a == "--order").and_then(|j| args.get(j + 1).cloned());
+                    let opt = export::ExportOptions { work, format, from: None, to: None, order };
                     if let Err(e) = export::start(&c2, opt) {
                         c2.log("export", "error", e, Value::Null);
                         c2.app.exit(1);

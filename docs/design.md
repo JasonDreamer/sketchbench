@@ -29,7 +29,7 @@ Nov 9, 2026 · @Jason
 - UIフレームワークは更新コストの小さいSolidを使う
 - コードエディタはMonacoより軽いCodeMirror 6にし、補完と型エラーはTypeScript 7(ネイティブ版)の言語サーバーから受け取る。言語サーバーはRustコアが子プロセスとして起動し(同梱して版を固定したtypescriptパッケージのtscを tsc --lsp --stdio で起動する。この引数は公式ブログにはなく、ts-lsp-mcpなど既存ツールの使い方による)、標準入出力とUI WebViewの間をTauriのChannelで中継する。get\_diagnostics は同じセッションの診断を返す
 - 音声解析、書き出し、前処理はRust側のスレッドで行い、UIスレッドに載せない
-- 起動時は前回のウィンドウとワークスペースを即座に復元し、スケッチの実行はその後に始める
+- 起動時は前回のウィンドウとワークスペースを即座に復元し、スケッチの実行はその後に始める。スケッチ用の子WebViewは、UIのWebView2環境ができてから(UIの読み込み後に)作る。UIの環境を作っている最中に別環境の子WebViewを作ると ERROR\_BUSY(0x800700AA)で失敗することがあった(フェーズ1)
 - 目標値: 起動から操作可能まで1秒、UI操作60fps、保存からプレビュー反映まで100ms
 
 **位置づけはAEとTouchDesignerの中間にある、コードで映像を定義するツールです。**
@@ -97,6 +97,7 @@ Windows専用のTauriアプリとして作ります。中心はディスク上�
 | Rust→スケッチ | アセット、解析データ、ビルド済みJS | 専用URIスキーム(fetch) |
 | Rust→スケッチ | AEプラグインから届く入力レイヤーのピクセル | WebView2のSharedBuffer(共有メモリ) |
 | スケッチ→Rust | 生存通知、エラー、ログ、フレーム時間、defineSketchの宣言(mode・renderer・params・tracksの型。setup成功時に送り、Rustコアが.cache/に保存してJSON Schemaを生成する) | 専用URIスキーム(POST) |
+| スケッチ→Rust | キー入力(プレビューにフォーカスがあるときのショートカット。RustがUIへイベントで渡す) | 専用URIスキーム(POST) |
 | スケッチ→Rust | 描画済みフレーム | SharedBuffer(共有メモリ)に書き、書き終えた通知だけを専用URIスキーム(POST)で送る。localhost HTTPとフレーム本体の専用URIスキームPOSTは許可しない(フェーズ0の4K 1枚: 共有メモリ7.7ms、localhost HTTP 160ms、専用URIスキーム328ms) |
 
 マイクとカメラはスケッチWebView内でgetUserMediaを使い、権限要求はアプリが自動で許可します。
@@ -222,7 +223,7 @@ export default defineSketch({
 
 `"html"` はHTML/CSSの要素を時刻tで動かし、画像にしてレイヤーとして使うモードです(Canvas系より書き出しは遅い)。98.cssのようなUIライブラリやブラウザの文字組みを映像に使えます。画像化の第一候補は、ChromiumのHTML-in-Canvas API(drawElementImage、WebGLのtexElementSubImage2D。オリジントライアル中。トークンは公開オリジン向けなので使わず、スケッチ用WebView2の起動引数に --enable-features=CanvasDrawElement を加える(ChromiumのFinch機能名。HyperFramesも書き出し時に同じ指定をしている)。フェーズ0ではWebView2 157で、この指定のない環境でも使えた。1080pの要素を描いて約6msで、アルファも残り、描画後のcanvasも読める。API名と対象要素の指定(canvasの子要素にし、属性はlayoutsubtreeからcontent="drawable"に変更)はChromium 150・155で変わったので機能検出で分岐し、ランタイムの更新で消える場合に備えてforeignObject方式を常に代替として保つ)です。使えない場合は、DOMをSVGのforeignObjectに入れてcanvasへ描く方式(html-to-imageなどと同じ仕組み)にします。同じスケッチWebView内で完結し、アルファも保てます。SVGはdata URLで読み込みます(フェーズ0では、blob URLで読むとcanvasがtaintされてピクセルを読めなかった)。SVG内から外部URLの画像やフォントは読まれないため、data URLとして事前に埋め込みます(文書側で読み込んだフォントも使われない)。表現できないCSSがある場合だけ、別の隠しWebViewに表示してWebView2の画面取り込み(CapturePreview。アルファなし、1080pで1回約270ms)で取り込み、専用URIスキーム経由で合成側に渡します。非表示や最小化のウィンドウでも取り込めます。CSSアニメーションとトランジションは、毎フレーム document.getAnimations() を一時停止して currentTime を時刻tに合わせて動かし、GSAPは timeline.seek(t) で動かします(HyperFramesのシークの実装を参考にする)。`"hydra"` はライブコーディング用の映像シンセHydraを、時刻を外から与えて動かすモードで、他のレンダラーの出力を入力に取れます。
 
-**既存コードを決定的に動かす仮想時計**: p5.jsのdrawループ、three.jsのClock、GSAP、Hydraはブラウザの時計とrequestAnimationFrameで動くため、そのままではプレビューと書き出しで結果がずれます。スケッチWebViewには[timeweb](https://github.com/tungs/timeweb)と同じ方式の仮想時計を最初に読み込み、`Date.now`、`performance.now`、`requestAnimationFrame`、`setTimeout`、`setInterval` を差し替えます。ランタイムが1フレーム分時刻を進めるたびに待機中のコールバックを実行するので、時刻tで書かれていないコードも書き出し時に同じ結果になります。この方式は時刻を戻せないため、こうしたコードのシークは先頭か保存点からの再実行になります。Hydraは `autoLoop: false` と `tick(dt)`、p5は `noLoop()` と `redraw()` で直接駆動します。timewebと同じく、`event.timeStamp` とWeb AudioのAnalyserNodeは仮想時計に従わないため、音への反応は必ず事前解析データを使います。
+**既存コードを決定的に動かす仮想時計**: p5.jsのdrawループ、three.jsのClock、GSAP、Hydraはブラウザの時計とrequestAnimationFrameで動くため、そのままではプレビューと書き出しで結果がずれます。スケッチWebViewには[timeweb](https://github.com/tungs/timeweb)と同じ方式の仮想時計を最初に読み込み、`Date.now`、`performance.now`、`requestAnimationFrame`、`setTimeout`、`setInterval` を差し替えます。ランタイムが1フレーム分時刻を進めるたびに待機中のコールバックを実行するので、時刻tで書かれていないコードも書き出し時に同じ結果になります。ランタイム自身が使うライブラリ(書き出しのMediabunnyなど)は内部でタイマーを使うことがあるため、フレームの合間(スケッチのコードが動いていないとき)だけ本物のタイマーに戻して呼ぶ。この方式は時刻を戻せないため、こうしたコードのシークは先頭か保存点からの再実行になります。Hydraは `autoLoop: false` と `tick(dt)`、p5は `noLoop()` と `redraw()` で直接駆動します。timewebと同じく、`event.timeStamp` とWeb AudioのAnalyserNodeは仮想時計に従わないため、音への反応は必ず事前解析データを使います。
 
 **スケッチの3分類**: スケッチは `defineSketch` の `mode` で次のどれかを宣言します。静的な解析では状態の有無を判定できないため、宣言は決定性テスト(時刻を順不同に描いてハッシュが一致するか)で検証し、食い違えば診断で知らせます。宣言がない場合は「逐次」として扱います。
 
@@ -338,7 +339,7 @@ MIDIは音符の可視化だけでなく、演出イベントの入力にも使�
 | Canvas2D・p5の2Dモード | 8bit | 8bit(合成時に16bitへ変換して他レイヤーと重ねる) |
 | HTML | 8bit(HTML-in-Canvas方式とforeignObject方式はアルファあり、画面取り込み方式はアルファなし) | 8bit |
 
-合成は16bit浮動小数で行い、8bitで書き出すときにディザをかけます。WebCodecsのVideoEncoderの設定には色の指定がないため、RGBからYUV(NV12)への変換はスケッチWebView内のシェーダーで行い、colorSpace(BT.709の原色・伝達特性・行列とレンジ)を明示したVideoFrameとしてエンコーダーに渡します(フェーズ0の環境ではRGBを直接渡してもBT.709リミテッドに変換されたが、エンコーダーの実装に依存するため自前で変換する)。フェーズ0では、WebCodecsが出力したH.264のVUIに色情報(video\_signal\_type)が入らず、colorSpaceはdecoderConfigのメタデータにしか反映されないことを確かめました。ビットストリーム内の色情報(VUI)は、音声を多重化するときにffmpegのビットストリームフィルター(h264\_metadata・hevc\_metadata)で再エンコードせずに書き込みます。色を厳密に決めたい書き出し(BT.709・リミテッドレンジやフルレンジの指定)は、RGBフレームをffmpegに渡してエンコードする経路を選べます。ffmpeg経由のH.264・H.265は、LGPLビルドで使えるハードウェアエンコーダー(Media Foundation、NVENC、Quick Sync、AMF)を使い、libx264・libx265は使いません。色情報がないと、再生ソフトごとにガンマや色がずれます。
+合成は16bit浮動小数で行い、8bitで書き出すときにディザをかけます。WebCodecsのVideoEncoderの設定には色の指定がないため、RGBからYUV(NV12)への変換はスケッチWebView内のシェーダーで行い(色深度とアルファを扱うフェーズ4から。フェーズ1は出力canvasをMediabunnyのCanvasSourceでRGBのまま渡し、フェーズ0で確かめたエンコーダー側のBT.709リミテッド変換に任せる)、colorSpace(BT.709の原色・伝達特性・行列とレンジ)を明示したVideoFrameとしてエンコーダーに渡します(フェーズ0の環境ではRGBを直接渡してもBT.709リミテッドに変換されたが、エンコーダーの実装に依存するため自前で変換する)。フェーズ0では、WebCodecsが出力したH.264のVUIに色情報(video\_signal\_type)が入らず、colorSpaceはdecoderConfigのメタデータにしか反映されないことを確かめました。ビットストリーム内の色情報(VUI)は、音声を多重化するときにffmpegのビットストリームフィルター(h264\_metadata・hevc\_metadata)で再エンコードせずに書き込みます。色を厳密に決めたい書き出し(BT.709・リミテッドレンジやフルレンジの指定)は、RGBフレームをffmpegに渡してエンコードする経路を選べます。ffmpeg経由のH.264・H.265は、LGPLビルドで使えるハードウェアエンコーダー(Media Foundation、NVENC、Quick Sync、AMF)を使い、libx264・libx265は使いません。色情報がないと、再生ソフトごとにガンマや色がずれます。
 
 他ソフトで仕上げる前提で、映像と一緒にタイミングデータも書き出します。マーカーとイベントを、AE用のJSXスクリプト(マーカー付きのレイヤーを生成)とBlender用のPythonスクリプト(キーフレームを生成)として出力し、仕上げ側で同じタイミングを使えるようにします。
 
@@ -471,7 +472,7 @@ AIの変更はすべて自動で履歴(git)に残し(MCP経由はツール呼び
 
 | 層 | 採用候補 |
 | --- | --- |
-| アプリ基盤 | Tauri 2(Rust)+ WebView2、フロントはVite + TypeScript |
+| アプリ基盤 | Tauri 2(Rust)+ WebView2、フロントはVite + TypeScript。Rustは app/rust-toolchain.toml で 1.97.0 に固定する(Oxc 0.158 が Rust 1.97 を要求する。0.133 は宣言上 1.93 対応だが実際にはビルドできなかった) |
 | UI | Solid、sliced-areas、Tweakpane v4、CodeMirror 6 |
 | 描画 | Canvas2D、WebGL2(twgl.js)、three.js、p5.js 2.x(互換アドオン付き)、Hydra、ISFシェーダー、HTML、WebGPUは後日 |
 | 時間制御 | timeweb方式の仮想時計(自前) |
@@ -563,6 +564,7 @@ AEプラグインで扱うのは純粋・状態ありスケッチに限り(逐�
 
 0. **技術検証**: 「先に検証する技術リスク」の9点を試作で確かめ、代替案の要否を決める(完了条件: 9点すべての採否と計測値を表に記録した)
 1. **最小ループ**: Tauriアプリの骨格(Rustコア、UI WebView、スケッチWebView)、仮想時計付きランタイム(Canvas2D・WebGL・ISFシェーダー・p5)、Oxcによるビルドとホットリロード、シークバーだけのタイムライン、WebCodecsでのMP4と連番PNG書き出し、`AGENTS.md`・型定義・最初のスキル。git導入(フェーズ3)までは、書き出しファイル名にコミットIDの代わりに内容ハッシュを入れる(完了条件: Claude Codeが書いたp5スケッチをプレビューし、1080p30の10秒MP4を書き出せる)
+   - 結果(2026-11-10): 完了条件を満たした。Claude Codeが作業フォルダのAGENTS.mdに従って書いたp5スケッチをプレビューし、1080p30・10秒(300フレーム)のH.264 MP4を5.5秒で書き出した。保存からプレビュー反映まで中央値51ms(最大60ms、12回)。連番PNGを順方向・逆順・シャッフルの順で描いた300フレームはバイト単位で一致した。確認用に起動引数 `--render <作品> --format mp4|png [--order forward|reverse|shuffle]` と `--open <作品>` を持つ(正式なCLIの `sb render` はフェーズ3)
 2. **音とMIDI**: 音声解析キャッシュと波形トラック、Beat This!によるビート推定、MIDIトラックとイベント対応表、クリップトラック(配置・伸縮・分割・一括入力と簡易インスペクタ)、ライブMIDI入力と録音、CC割り当て、スクラブ再生、音声付き書き出し、BPMグリッド、有理数の時刻とNTSC系フレームレート(完了条件: 曲のビートに合わせたスケッチを29.97fpsの音声付きMP4で書き出し、音と映像のずれが全編で1フレーム未満)
 3. **AIが自分で確認できる**: rmcpによるMCPサーバー(`render_frames`、コンタクトシート、診断)、TypeScript 7による型チェック、JSON Schema検証、非表示ウィンドウを使うCLI描画と \`sb mcp\` 中継、単一インスタンス化(tauri-plugin-single-instance)、git自動コミットと履歴パネル(完了条件: AIが人の操作なしに描画・確認・修正を繰り返して依頼を完了できる)
 4. **制作ソフトとしての基盤**: sliced-areasによるBlender式UIとワークスペース、Tweakpaneでの自動パラメータUIとキーフレーム、グラフエディタ、simulateと保存点、クリップ内フィールドのキーフレーム、文字モジュール(縦書き・ルビ・グリフ)、タイムコード表示、レイヤー合成(ブレンドモード、トランスフォーム、トラックマット、inputs.layer)、プレビューキャッシュ、レンダーキュー、色深度・アルファ・モーションブラー、LUFS正規化と複数仕様の書き出し、ループの継ぎ目表示、自動保存と再リンク、自己更新、内蔵チャット、決定性テストと回帰テスト(完了条件: 3分のMVをこのアプリだけで制作し、レンダーキューで4K書き出しできる)

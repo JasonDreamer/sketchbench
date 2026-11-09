@@ -5,7 +5,7 @@
 
 ## 進め方
 - `docs/design.md` の「開発フェーズ」の順に作る。各フェーズの完了条件を満たすまで次へ進まない。
-- 今はフェーズ1(最小ループ)。フェーズ0の結果は `docs/phase0-results.md`、試作は `phase0/`(本体からは参照しない)。
+- フェーズ1(最小ループ)は完了(結果は design.md の開発フェーズ)。次はフェーズ2(音とMIDI)。フェーズ0の結果は `docs/phase0-results.md`、試作は `phase0/`(本体からは参照しない)。
 - アプリ本体は `app/`(Rustコア、`app/ui` がUI)、ランタイムは `packages/runtime`(`@sketchbench/runtime`)。ランタイムのTSはRustコアがOxcで変換して配信する。
 - 開発中の作業フォルダは環境変数 `SB_WORKSPACE` で指定する(既定は `%USERPROFILE%\Documents\Sketchbench`)。リポジトリ内で試すときは `.dev-workspace/`(gitに入れない)を使う。
 

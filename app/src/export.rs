@@ -25,6 +25,9 @@ pub struct ExportOptions {
     pub format: String,
     pub from: Option<u64>,
     pub to: Option<u64>,
+    /// 連番PNGで描く順番。"forward"(既定)・"reverse"・"shuffle"。決定性の確認用
+    #[serde(default)]
+    pub order: Option<String>,
 }
 
 pub struct Job {
@@ -71,7 +74,11 @@ pub fn start(core: &Arc<Core>, opt: ExportOptions) -> Result<Value, String> {
     };
     let id = format!("job{}", core.next_id());
     let label = format!("export-{id}");
-    let extra = format!("&job={id}&format={}&from={from}&to={to}", opt.format);
+    let order = opt.order.clone().unwrap_or_else(|| "forward".into());
+    if opt.format == "mp4" && order != "forward" {
+        return Err("MP4は順方向でしか書き出せない".into());
+    }
+    let extra = format!("&job={id}&format={}&from={from}&to={to}&order={order}", opt.format);
     let url = core.host_url(&label, &opt.work, "export", &extra);
     core.jobs.lock().unwrap().insert(
         id.clone(),

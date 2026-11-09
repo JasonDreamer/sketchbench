@@ -16,18 +16,21 @@ async function preview() {
   let dirty = true;
   let busy = false;
   let reloadPending = false;
+  // 計測用: Rustが変更を検知した時刻(UNIX ms)
+  let reloadDetectedAt = 0;
 
   await listen("sb:time", (m: TimeMsg) => {
     time = m;
     if (!m.playing) dirty = true;
   });
-  await listen("sb:reload", () => {
+  await listen("sb:reload", (m: { unixMs: number }) => {
     reloadPending = true;
+    reloadDetectedAt = m.unixMs;
   });
 
   // プレビューにフォーカスがあるときのキー操作はUIへ渡す(ショートカットはUIが持つ)
   addEventListener("keydown", (e) => {
-    if (e.code === "Space" || e.key.startsWith("Arrow") || e.key === "Home") e.preventDefault();
+    if (e.code === "Space" || e.key === " " || e.key.startsWith("Arrow") || e.key === "Home") e.preventDefault();
     post("/key", JSON.stringify({ code: e.code, key: e.key, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey })).catch(() => {});
   });
 
@@ -48,6 +51,7 @@ async function preview() {
         setPhase("ready");
         dirty = true;
       }
+      const measuring = reloadDetectedAt > 0 && dirty;
       let f = time.frame;
       if (time.playing) f += ((real.unixMs() - time.unixMs) / 1000) * time.fps;
       const dur = engine.project?.duration ?? time.duration;
@@ -56,6 +60,11 @@ async function preview() {
       if (frame !== engine.lastFrame || dirty) {
         dirty = false;
         await engine.render(frame);
+        if (measuring) {
+          const done = real.unixMs();
+          log("info", `変更の検知から描画まで ${Math.round(done - reloadDetectedAt)} ms(描画時刻 ${Math.round(done)})`, { detectedUnixMs: reloadDetectedAt, renderedUnixMs: done });
+          reloadDetectedAt = 0;
+        }
       }
     } catch (e) {
       log("error", errorText(e));
@@ -116,7 +125,20 @@ async function exportJob() {
       });
     }
 
-    for (let f = from; f < to; f++) {
+    // 描く順番(純粋スケッチの決定性の確認用)。MP4は常に順方向
+    const frames = Array.from({ length: to - from }, (_, i) => from + i);
+    const order = query.get("order") ?? "forward";
+    if (order === "reverse") frames.reverse();
+    if (order === "shuffle") {
+      let s = 12345;
+      for (let i = frames.length - 1; i > 0; i--) {
+        s = (s * 1103515245 + 12345) >>> 0;
+        const j = s % (i + 1);
+        [frames[i], frames[j]] = [frames[j], frames[i]];
+      }
+    }
+    let n = 0;
+    for (const f of frames) {
       await engine.render(f);
       if (format === "mp4") {
         await withRealTimers(() => source.add((f - from) * frameDur, frameDur));
@@ -126,7 +148,8 @@ async function exportJob() {
         const r = await post(`/export/frame?job=${job}&i=${f}`);
         if (!r.ok) throw new Error(`フレーム送信失敗: ${await r.text()}`);
       }
-      if ((f - from) % 10 === 0) post(`/export/progress?job=${job}&done=${f - from}`).catch(() => {});
+      n++;
+      if (n % 10 === 0) post(`/export/progress?job=${job}&done=${n}`).catch(() => {});
     }
     if (output) await withRealTimers(() => output.finalize());
     if (sharedView) (window as any).chrome.webview.releaseBuffer(sharedView.buffer);
