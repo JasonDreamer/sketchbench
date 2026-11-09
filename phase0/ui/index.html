@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Sketchbench phase0</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 13px/1.5 system-ui, sans-serif; display: grid; grid-template-columns: 1fr 60%; height: 100vh; }
+  #side { padding: 12px; overflow: auto; border-right: 1px solid #8884; }
+  #side button { margin: 2px 4px 2px 0; }
+  #log { white-space: pre-wrap; font: 12px/1.4 ui-monospace, monospace; }
+  #right { display: flex; flex-direction: column; }
+  #preview { position: relative; background: #222; aspect-ratio: 16 / 9; }
+  #still { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
+  #uigl { width: 320px; height: 180px; }
+</style>
+</head>
+<body>
+<div id="side">
+  <h3>フェーズ0 計測</h3>
+  <p>右上の領域にスケッチ用の子WebView(別のWebView2環境)が重なります。ボタンで項目を個別に実行できます。結果は phase0/results/raw.jsonl に追記されます。</p>
+  <div>
+    <button data-t="gpusel">9 GPU</button>
+    <button data-t="process">2 分離</button>
+    <button data-t="hang">2 無限ループ復旧</button>
+    <button data-t="pfail">2 ProcessFailed</button>
+    <button data-t="transfer">3 転送</button>
+    <button data-t="html">4 HTML</button>
+    <button data-t="codecs">5 WebCodecs</button>
+    <button data-t="child">6 子WebView</button>
+    <button data-t="gpu">7 GPU共有</button>
+    <button data-t="hidden">1 非表示</button>
+    <button data-t="gpuhang">7 シェーダー無限ループ(画面が止まる場合あり)</button>
+  </div>
+  <canvas id="uigl" width="320" height="180"></canvas>
+  <div id="log"></div>
+</div>
+<div id="right">
+  <div id="preview"><img id="still" alt=""></div>
+  <div style="padding:8px">UIのrAF: <span id="fps">-</span></div>
+</div>
+<script>
+const SB = 'http://sb.localhost';
+const post = (p, b) => fetch(SB + p, { method: 'POST', body: typeof b === 'string' ? b : JSON.stringify(b) });
+const logEl = document.getElementById('log');
+const log = (s) => { logEl.textContent = s + '\n' + logEl.textContent.slice(0, 20000); };
+
+window.__run = async (id, fn) => {
+  let r;
+  try { r = { ok: true, v: await fn() }; } catch (e) { r = { ok: false, err: String(e && e.stack || e) }; }
+  await post('/done?id=' + id, r);
+};
+
+// rAFの間隔とsetTimeoutの遅れを測る
+const mons = {};
+function frameLoop(m) {
+  let last = performance.now();
+  const tick = (now) => { if (m.stop) return; m.gaps.push(now - last); last = now; requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+  const ping = () => { if (m.stop) return; const t = performance.now(); setTimeout(() => { m.lag.push(performance.now() - t - 16); ping(); }, 16); };
+  ping();
+}
+const stat = (v) => { if (!v.length) return null; const s = [...v].sort((a, b) => a - b); const r = x => Math.round(x * 100) / 100; return { n: s.length, median: r(s[s.length >> 1]), p99: r(s[Math.min(s.length - 1, Math.floor(s.length * 0.99))]), max: r(s[s.length - 1]) }; };
+
+const glState = { lost: 0, restored: 0, frames: 0, errors: 0, stop: true };
+const UI = {
+  previewRect() { const r = document.getElementById('preview').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; },
+  monStart(k) { mons[k] = { gaps: [], lag: [], stop: false }; frameLoop(mons[k]); return true; },
+  monStop(k) { const m = mons[k]; m.stop = true; return { rafGapMs: stat(m.gaps), timeoutLagMs: stat(m.lag) }; },
+  rectLog: null,
+  rectLogStart() { this.rectLog = []; return true; },
+  rectLogStop() { const v = this.rectLog; this.rectLog = null; return stat(v); },
+  async showStill() {
+    const t0 = performance.now();
+    const img = document.getElementById('still');
+    const blob = await (await fetch(SB + '/still.png')).blob();
+    const url = URL.createObjectURL(blob);
+    img.src = url; await img.decode(); img.style.display = 'block';
+    return performance.now() - t0;
+  },
+  hideStill() { document.getElementById('still').style.display = 'none'; return true; },
+  // UI側のWebGLが、スケッチ側のGPU障害で巻き込まれるか
+  glWatchStart() {
+    const c = document.getElementById('uigl');
+    const gl = c.getContext('webgl2');
+    Object.assign(glState, { lost: 0, restored: 0, frames: 0, errors: 0, stop: false, firstLostAt: null, t0: performance.now() });
+    c.addEventListener('webglcontextlost', (e) => { e.preventDefault(); glState.lost++; glState.firstLostAt ??= performance.now() - glState.t0; });
+    c.addEventListener('webglcontextrestored', () => glState.restored++);
+    const px = new Uint8Array(4);
+    const tick = () => {
+      if (glState.stop) return;
+      if (!gl.isContextLost()) {
+        gl.clearColor((glState.frames % 60) / 60, 0.3, 0.6, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        glState.frames++;
+      } else glState.errors++;
+      requestAnimationFrame(tick);
+    };
+    tick();
+    return true;
+  },
+  glWatchStop() { glState.stop = true; const { stop, ...r } = glState; return r; },
+};
+window.UI = UI;
+
+// プレビュー領域の変化をRustへ送り、子WebViewを追従させる
+const pv = document.getElementById('preview');
+new ResizeObserver(async () => {
+  const t0 = performance.now();
+  await post('/rect', UI.previewRect());
+  if (UI.rectLog) UI.rectLog.push(performance.now() - t0);
+}).observe(pv);
+
+// UIのfps表示(負荷の目視用)
+{ let n = 0, t = performance.now(); const f = (now) => { n++; if (now - t > 1000) { document.getElementById('fps').textContent = n + ' fps'; n = 0; t = now; } requestAnimationFrame(f); }; requestAnimationFrame(f); }
+
+document.querySelectorAll('button[data-t]').forEach(b => b.onclick = () => { log('run ' + b.dataset.t); post('/run?t=' + b.dataset.t, ''); });
+</script>
+<script src="http://sb.localhost/s/tests.js"></script>
+<script>
+post('/hello?l=ui', {});
+</script>
+</body>
+</html>

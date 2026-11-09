@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>フェーズ0 計測ページ</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; max-width: 960px; }
+  button { margin: 4px 8px 4px 0; padding: 6px 12px; }
+  pre { background: #f4f4f4; padding: 12px; white-space: pre-wrap; }
+  canvas { border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>フェーズ0 計測ページ</h1>
+<p>Edge、またはWebView2(起動引数を設計書どおりに指定したもの)で開いて、各ボタンを押します。結果はまとめて下に出るので、そのまま貼ってください。</p>
+
+<button id="b-all">すべて実行</button>
+<button id="b-copy">結果をコピー</button>
+<hr>
+<button id="b-env">環境情報</button>
+<button id="b-glctx">WebGLコンテキスト上限(メイン)</button>
+<button id="b-glworker">WebGLコンテキスト上限(Worker)</button>
+<button id="b-tex">4Kテクスチャコピー時間</button>
+<button id="b-codec">WebCodecs対応</button>
+<button id="b-hic">HTML-in-Canvas</button>
+<button id="b-anim">CSSアニメのシーク</button>
+<button id="b-post">4Kフレーム転送(localhost)</button>
+<button id="b-timer">非表示時のタイマー(手動)</button>
+<p>localhost受信サーバー: <input id="post-url" size="40" value="http://127.0.0.1:8787/frame"> (server.mjs を起動しておく)</p>
+
+<pre id="out"></pre>
+
+<div id="hic-wrap"></div>
+
+<script>
+const out = document.getElementById('out');
+const log = (k, v) => { out.textContent += `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}\n`; };
+const W = 3840, H = 2160;
+
+async function env() {
+  log('userAgent', navigator.userAgent);
+  const uad = navigator.userAgentData;
+  if (uad?.getHighEntropyValues) {
+    const v = await uad.getHighEntropyValues(['fullVersionList', 'platformVersion']);
+    log('fullVersionList', v.fullVersionList);
+  }
+  const gl = document.createElement('canvas').getContext('webgl2');
+  const dbg = gl?.getExtension('WEBGL_debug_renderer_info');
+  log('GPU', dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '取得不可');
+  log('hardwareConcurrency', navigator.hardwareConcurrency);
+}
+
+function glContextLimitMain() {
+  const ctxs = []; let lost = 0;
+  for (let i = 0; i < 32; i++) {
+    const c = document.createElement('canvas');
+    c.addEventListener('webglcontextlost', () => lost++);
+    const gl = c.getContext('webgl2');
+    if (!gl) break;
+    ctxs.push(gl);
+  }
+  // 喪失イベントは非同期なので少し待つ
+  return new Promise(r => setTimeout(() => {
+    const alive = ctxs.filter(g => !g.isContextLost()).length;
+    log('WebGL(メイン) 作成数/生存数/喪失イベント', { created: ctxs.length, alive, lost });
+    r();
+  }, 500));
+}
+
+function glContextLimitWorker() {
+  const src = `
+    onmessage = () => {
+      const ctxs = [];
+      for (let i = 0; i < 32; i++) {
+        const gl = new OffscreenCanvas(16, 16).getContext('webgl2');
+        if (!gl) break;
+        ctxs.push(gl);
+      }
+      setTimeout(() => postMessage({ created: ctxs.length, alive: ctxs.filter(g => !g.isContextLost()).length }), 500);
+    };`;
+  const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+  return new Promise(r => {
+    w.onmessage = e => { log('WebGL(Worker) 作成数/生存数', e.data); w.terminate(); r(); };
+    w.onerror = e => { log('WebGL(Worker)', 'エラー: ' + e.message); r(); };
+    w.postMessage(0);
+  });
+}
+
+async function texCopy() {
+  const src = document.createElement('canvas'); src.width = W; src.height = H;
+  const sg = src.getContext('webgl2', { preserveDrawingBuffer: true });
+  sg.clearColor(0.2, 0.4, 0.6, 1); sg.clear(sg.COLOR_BUFFER_BIT);
+  const dst = document.createElement('canvas'); dst.width = W; dst.height = H;
+  const gl = dst.getContext('webgl2');
+  const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src); // 初回確保
+  const px = new Uint8Array(4); const times = [];
+  for (let i = 0; i < 10; i++) {
+    sg.clearColor(Math.random(), 0, 0, 1); sg.clear(sg.COLOR_BUFFER_BIT);
+    const t0 = performance.now();
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); // 完了待ち
+    times.push(performance.now() - t0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb);
+  }
+  times.sort((a, b) => a - b);
+  log('4Kテクスチャコピー ms(中央値/最大)', { median: +times[5].toFixed(2), max: +times[9].toFixed(2) });
+}
+
+async function codecs() {
+  if (!('VideoEncoder' in window)) { log('WebCodecs', '非対応'); return; }
+  const cands = {
+    'H.264 High L5.2 (avc1.640034)': 'avc1.640034',
+    'H.265 Main (hvc1.1.6.L153.B0)': 'hvc1.1.6.L153.B0',
+    'AV1 Main (av01.0.13M.08)': 'av01.0.13M.08',
+    'VP9 (vp09.00.51.08)': 'vp09.00.51.08',
+  };
+  for (const [name, codec] of Object.entries(cands)) {
+    for (const hw of ['prefer-hardware', 'no-preference']) {
+      try {
+        const r = await VideoEncoder.isConfigSupported({ codec, width: W, height: H, framerate: 30, bitrate: 50e6, hardwareAcceleration: hw });
+        log(`${name} 4K30 ${hw}`, r.supported);
+      } catch (e) { log(`${name} ${hw}`, 'エラー ' + e.message); }
+    }
+  }
+  // 実際に1フレームエンコードして出力の色情報を見る
+  try {
+    let meta = null;
+    const enc = new VideoEncoder({ output: (_, m) => { if (m?.decoderConfig) meta = m.decoderConfig; }, error: e => log('encode error', e.message) });
+    enc.configure({ codec: 'avc1.640034', width: 1920, height: 1080, bitrate: 10e6, framerate: 30 });
+    const buf = new Uint8Array(1920 * 1080 * 3 / 2).fill(128);
+    const f = new VideoFrame(buf, { format: 'NV12', codedWidth: 1920, codedHeight: 1080, timestamp: 0,
+      colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false } });
+    enc.encode(f, { keyFrame: true }); f.close();
+    await enc.flush(); enc.close();
+    log('H.264 出力decoderConfig.colorSpace', meta?.colorSpace ?? '無し');
+  } catch (e) { log('H.264 1フレーム試験', 'エラー ' + e.message); }
+}
+
+async function hic() {
+  const ctx2d = document.createElement('canvas').getContext('2d');
+  const has2d = typeof ctx2d.drawElementImage === 'function';
+  const gl = document.createElement('canvas').getContext('webgl2');
+  log('HTML-in-Canvas drawElementImage', has2d);
+  log('HTML-in-Canvas texElementSubImage2D / texElementImage2D', { sub: typeof gl?.texElementSubImage2D === 'function', old: typeof gl?.texElementImage2D === 'function' });
+  if (!has2d) return;
+  const wrap = document.getElementById('hic-wrap');
+  const c = document.createElement('canvas'); c.width = 400; c.height = 120;
+  c.setAttribute('content', 'drawable'); c.setAttribute('layoutsubtree', ''); // 新旧両方
+  const el = document.createElement('div'); el.setAttribute('drawable', '');
+  el.style.cssText = 'font:32px serif;color:#c00;background:transparent';
+  el.textContent = 'HTML-in-Canvas テスト';
+  c.appendChild(el); wrap.appendChild(c);
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  try {
+    const ctx = c.getContext('2d');
+    const t0 = performance.now();
+    ctx.drawElementImage(el, 0, 0);
+    const dt = performance.now() - t0;
+    const d = ctx.getImageData(0, 0, 400, 120).data;
+    let painted = 0, transparent = 0;
+    for (let i = 3; i < d.length; i += 4) { if (d[i] > 0) painted++; else transparent++; }
+    log('drawElementImage 結果', { ms: +dt.toFixed(2), paintedPixels: painted, transparentPixels: transparent });
+  } catch (e) { log('drawElementImage', 'エラー ' + e.message); }
+}
+
+async function animSeek() {
+  const el = document.createElement('div');
+  el.style.cssText = 'width:10px;height:10px;transition:transform 1s linear';
+  document.body.appendChild(el);
+  el.getBoundingClientRect();
+  el.style.transform = 'translateX(100px)';
+  const anims = document.getAnimations();
+  anims.forEach(a => { a.pause(); a.currentTime = 500; });
+  await new Promise(r => requestAnimationFrame(r));
+  const m = new DOMMatrix(getComputedStyle(el).transform);
+  log('CSSトランジションのシーク(0.5秒時点のx、期待値50)', +m.m41.toFixed(2));
+  el.remove();
+}
+
+async function post() {
+  const url = document.getElementById('post-url').value;
+  const body = new Uint8Array(W * H * 4);
+  const times = [];
+  try {
+    for (let i = 0; i < 5; i++) {
+      const t0 = performance.now();
+      const r = await fetch(url, { method: 'POST', body, headers: { 'x-token': 'bench' } });
+      await r.text();
+      times.push(performance.now() - t0);
+    }
+    times.sort((a, b) => a - b);
+    log('4K RGBA8 POST ms(中央値/最大)', { median: +times[2].toFixed(1), max: +times[4].toFixed(1), MB: +(body.length / 1e6).toFixed(1) });
+  } catch (e) { log('4K POST', 'エラー ' + e.message + '(server.mjs を起動したか確認)'); }
+}
+
+function timerHidden() {
+  log('非表示タイマー', '計測開始。このウィンドウを最小化して6分以上待ち、戻ってから結果を確認してください');
+  const gaps = []; let last = performance.now(); let hiddenSince = null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) hiddenSince = performance.now();
+    else {
+      const max = Math.max(...gaps.slice(-50), 0);
+      log('非表示中のsetInterval(500ms)最大間隔 ms', +max.toFixed(0));
+      log('非表示だった時間 s', +((performance.now() - hiddenSince) / 1000).toFixed(0));
+    }
+  });
+  setInterval(() => { const n = performance.now(); gaps.push(n - last); last = n; }, 500);
+}
+
+const bind = (id, fn) => document.getElementById(id).onclick = fn;
+bind('b-env', env); bind('b-glctx', glContextLimitMain); bind('b-glworker', glContextLimitWorker);
+bind('b-tex', texCopy); bind('b-codec', codecs); bind('b-hic', hic); bind('b-anim', animSeek);
+bind('b-post', post); bind('b-timer', timerHidden);
+bind('b-copy', () => navigator.clipboard.writeText(out.textContent));
+bind('b-all', async () => {
+  out.textContent = '';
+  for (const f of [env, glContextLimitMain, glContextLimitWorker, texCopy, codecs, hic, animSeek, post]) {
+    try { await f(); } catch (e) { log(f.name, 'エラー ' + e.message); }
+  }
+  log('完了', '非表示タイマーは別ボタンで手動計測');
+});
+</script>
+</body>
+</html>

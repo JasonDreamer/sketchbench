@@ -1,0 +1,5 @@
+# ビルド成果物と計測結果
+target/
+phase0/results/
+node_modules/
+phase0/gen/
