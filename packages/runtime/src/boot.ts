@@ -2,7 +2,7 @@
 
 import { real, withRealTimers, onError } from "./clock.js";
 import { install as installRandom } from "./rand.js";
-import { errorText, listen, log, mode, post, query, setPhase } from "./bridge.js";
+import { errorText, listen, log, mode, post, query, setPhase, work } from "./bridge.js";
 import { Engine } from "./engine.js";
 
 installRandom();
@@ -102,6 +102,12 @@ async function exportJob() {
     // MP4: WebCodecs + Mediabunny。H.264で通らなければAV1にする(WebView2はH.265を使えない。フェーズ0)
     let output: any = null;
     let source: any = null;
+    // 音声: Rustコアがミックスした48kHzのPCMを受け取り、映像と同じ時刻の基準で多重化する
+    const SR = 48000;
+    let audioSource: any = null;
+    let audioPcm: Float32Array | null = null;
+    let audioSent = 0; // 送ったサンプル数(1チャンネルあたり)
+    let mbAudioSample: any = null;
     if (format === "mp4") {
       await withRealTimers(async () => {
         const mb: any = await import("mediabunny");
@@ -120,6 +126,16 @@ async function exportJob() {
         output = new mb.Output({ format: new mb.Mp4OutputFormat(), target: new mb.StreamTarget(writable, { chunked: true }) });
         source = new mb.CanvasSource(engine.output, { codec, bitrate, keyFrameInterval: 2 });
         output.addVideoTrack(source, { frameRate: fps[0] / fps[1] });
+        if ((engine.project.audio ?? []).length > 0) {
+          const r = await fetch(`/work/${encodeURIComponent(work)}/mixdown/${from}-${to}@${SR}`);
+          if (!r.ok) throw new Error(`音声をミックスできない: ${await r.text()}`);
+          audioPcm = new Float32Array(await r.arrayBuffer());
+          const acodec = (await mb.canEncodeAudio("aac", { numberOfChannels: 2, sampleRate: SR, bitrate: 192000 })) ? "aac" : "opus";
+          audioSource = new mb.AudioSampleSource({ codec: acodec, bitrate: 192000 });
+          output.addAudioTrack(audioSource);
+          mbAudioSample = mb.AudioSample;
+          log("info", `音声: ${acodec} 48kHz ステレオ ${(audioPcm.length / 2 / SR).toFixed(2)}秒`);
+        }
         await output.start();
         log("info", `MP4書き出し: ${codec} ${width}x${height} ${bitrate} bps`);
       });
@@ -142,6 +158,17 @@ async function exportJob() {
       await engine.render(f);
       if (format === "mp4") {
         await withRealTimers(() => source.add((f - from) * frameDur, frameDur));
+        // 映像の進みに合わせて、1秒ぶんずつ音声を送る
+        if (audioPcm) {
+          const until = Math.min(audioPcm.length / 2, Math.ceil((f - from + 1) * frameDur * SR));
+          while (audioSent < until && (until - audioSent >= SR || f === to - 1)) {
+            const n = Math.min(SR, audioPcm.length / 2 - audioSent);
+            const data = audioPcm.slice(audioSent * 2, (audioSent + n) * 2);
+            const ts = audioSent / SR;
+            await withRealTimers(() => audioSource.add(new mbAudioSample({ data, format: "f32", numberOfChannels: 2, sampleRate: SR, timestamp: ts })));
+            audioSent += n;
+          }
+        }
       } else {
         const px = engine.out2d.getImageData(0, 0, width, height).data;
         sharedView!.set(px);
@@ -161,4 +188,5 @@ async function exportJob() {
 }
 
 if (mode === "export") exportJob();
+else if ((mode as string) === "verify") import("./verify.js").then((m) => m.verify());
 else preview();

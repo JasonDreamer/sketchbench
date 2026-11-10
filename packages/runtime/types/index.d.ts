@@ -50,8 +50,46 @@ export interface Rand {
   noise(x: number, y?: number, z?: number): number;
 }
 
-/** 作品フォルダの assets/ を読む。音声・MIDIの解析(audio、midi)はフェーズ2 */
+export interface BeatInfo {
+  /** 何拍目か(0から)。最初の拍より前は -1 */
+  index: number;
+  /** 拍の中の進み具合(0〜1) */
+  phase: number;
+  /** 直前の拍からの経過秒 */
+  since: number;
+  /** 何小節目か(0から)。小節頭がない場合は -1 */
+  bar: number;
+  /** 小節の中で何拍目か(0から) */
+  beatInBar: number;
+  /** 直前の拍が小節頭か */
+  downbeat: boolean;
+}
+
+/** 解析済みの音声。値はすべて作品時刻 t(秒)で引く(project.json の audio の offset を反映済み) */
+export interface AudioTrack {
+  readonly duration: number;
+  readonly bpm: number | null;
+  /** ビート・小節頭・オンセットの時刻(作品時刻、秒)。ビートは Beat This! で推定 */
+  readonly beats: readonly number[];
+  readonly downbeats: readonly number[];
+  readonly onsets: readonly number[];
+  /** 音量(0〜1) */
+  rms(t: number): number;
+  /** 帯域のエネルギー(0〜1)。low: 〜200Hz、mid: 200〜2000Hz、high: 2000Hz〜 */
+  band(name: "low" | "mid" | "high", t: number): number;
+  /** 波形の最小値と最大値(-1〜1) */
+  wave(t: number): [number, number];
+  beat(t: number): BeatInfo;
+  /** 直前のビートから指数的に減衰する値(ビートの瞬間に1)。decay は秒 */
+  pulse(t: number, decay?: number): number;
+  /** 直前のオンセットから指数的に減衰する値 */
+  onset(t: number, decay?: number): number;
+}
+
+/** 作品フォルダの assets/ を読む */
 export interface Assets {
+  /** 解析済みの音声(wav、mp3、flac など) */
+  audio(path: string): Promise<AudioTrack>;
   url(path: string): string;
   image(path: string): Promise<HTMLImageElement>;
   text(path: string): Promise<string>;

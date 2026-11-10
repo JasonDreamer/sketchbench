@@ -48,7 +48,7 @@ export default defineSketch({
 | `width` / `height` | 出力解像度(project.json の値) |
 | `p` | params宣言の値。project.json の `layers[].params` で上書きできる |
 | `rand` | シード固定の乱数。`rand()`、`rand.range(a, b)`、`rand.int(a, b)`、`rand.pick(配列)`、`rand.chance(確率)`、`rand.noise(x, y, z)` |
-| `assets` | setupで使う。`assets.image("a.png")`、`assets.json("data.json")`、`assets.font("名前", "f.ttf")` は `assets/` 以下を読む |
+| `assets` | setupで使う。`assets.audio("song.wav")`、`assets.image("a.png")`、`assets.json("data.json")`、`assets.font("名前", "f.ttf")` は `assets/` 以下を読む |
 
 paramsの型は float、int、bool、color、vec2、enum、text、file、curve、list\<text>。
 
@@ -57,6 +57,35 @@ paramsの型は float、int、bool、color、vec2、enum、text、file、curve�
 - `g` が p5 インスタンスなので、`g.circle(...)`、`g.background(...)` のように書きます。グローバル関数(`circle()` など)は使えません
 - アプリが `noLoop()` と `redraw()` で1フレームずつ駆動します。`createCanvas`、`frameRate`、`loop` は呼ばないでください
 - 時間は `frameCount` や `millis()` より、引数の `t` と `frame` を使ってください
+
+### 音に合わせる
+
+音声は `project.json` の `audio` に登録すると再生と書き出しに入り、スケッチからは `assets.audio()` で解析済みの値を時刻で引けます。リアルタイムの解析(Web AudioのAnalyserNode)は使わないでください。シークや書き出しで値がずれます。
+
+```json
+"audio": [{ "asset": "assets/song.wav", "offset": 0 }]
+```
+
+```ts
+async setup({ assets }) {
+  return { song: await assets.audio("song.wav") };
+},
+draw({ g, t }, { song }) {
+  const kick = song.pulse(t, 0.15);     // ビートの瞬間に1、そこから減衰
+  const low = song.band("low", t);     // 低音のエネルギー(0〜1)
+  const b = song.beat(t);              // { index, phase, bar, beatInBar, downbeat }
+},
+```
+
+| 関数 | 内容 |
+| --- | --- |
+| `rms(t)` | 音量(0〜1) |
+| `band("low" | "mid" | "high", t)` | 帯域のエネルギー(0〜1)。low は〜200Hz、mid は200〜2000Hz、high は2000Hz〜 |
+| `beat(t)` | 何拍目か、拍の中の進み具合、何小節目か、小節の何拍目か |
+| `pulse(t, 減衰秒)` / `onset(t, 減衰秒)` | 直前のビート/オンセットから減衰する値 |
+| `beats` / `downbeats` / `onsets` / `bpm` | 時刻の配列と推定BPM |
+
+`offset` は作品のフレーム数です。`t` は作品の時刻なので、offset を変えてもスケッチは書き換えずに済みます。
 
 ### シェーダー(ISF)
 

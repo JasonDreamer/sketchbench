@@ -85,6 +85,9 @@ pub struct Project {
     pub layers: Vec<Layer>,
     #[serde(default)]
     pub seed: u32,
+    /// 音声トラック。書き出しとプレビューの再生でミックスする
+    #[serde(default)]
+    pub audio: Vec<AudioEntry>,
     #[serde(flatten)]
     pub rest: serde_json::Map<String, Value>,
 }
@@ -97,6 +100,27 @@ pub struct Layer {
     pub params: serde_json::Map<String, Value>,
     #[serde(flatten)]
     pub rest: serde_json::Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioEntry {
+    /// 作品フォルダからの相対パス(例: "assets/song.wav")
+    pub asset: String,
+    /// 音声の先頭を置く作品のフレーム
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain: Option<f32>,
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, Value>,
+}
+
+/// 作品フォルダ内の相対パスを、フォルダの外に出ない場合だけ結合する。
+pub fn safe_rel(work_dir: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.split(['/', '\\']).any(|c| c == ".." || c.contains(':')) {
+        return None;
+    }
+    Some(work_dir.join(rel))
 }
 
 impl Project {

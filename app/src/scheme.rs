@@ -118,7 +118,12 @@ pub fn handle(app: &tauri::AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>
             let Some(f) = safe_join(&repo.join("packages/runtime/src"), &format!("{rel}.ts")) else { return err(403, "") };
             match c.cache.get(&f) {
                 Ok(b) => resp(200, "text/javascript; charset=utf-8", b.js.into_bytes()),
-                Err(d) => err(500, format!("{d:?}")),
+                Err(d) => {
+                    // ランタイムが読み込めないとスケッチWebViewは何も報告できないので、Rust側で知らせる
+                    let msg = d.iter().map(|x| x.message.clone()).collect::<Vec<_>>().join("\n");
+                    c.log("core", "error", format!("ランタイムを変換できない:\n{msg}"), Value::Null);
+                    err(500, msg)
+                }
             }
         }
         "/vendor/p5.js" => file(&repo.join("node_modules/p5/lib/p5.esm.min.js")),
@@ -158,6 +163,13 @@ pub fn handle(app: &tauri::AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>
             resp(200, "text/plain", vec![])
         }
         p if p.starts_with("/export/") => export_route(&c, p, &req),
+        // 開発用: --verify の結果を表示して終了する
+        "/verify/result" => {
+            println!("[verify] {}", String::from_utf8_lossy(req.body()));
+            let ok = serde_json::from_slice::<Value>(req.body()).ok().and_then(|v| v["ok"].as_bool()).unwrap_or(false);
+            c.app.exit(if ok { 0 } else { 1 });
+            resp(200, "text/plain", vec![])
+        }
         _ => err(404, "not found"),
     }
 }
@@ -214,6 +226,30 @@ fn work_file(c: &Arc<Core>, p: &str) -> Response<Vec<u8>> {
             }
             _ => err(404, "shader.fs がない"),
         },
+        // /work/<作品>/analysis/<作品内の相対パス> : 音声の解析結果(キャッシュがなければ作る)
+        "analysis" => match workspace::safe_rel(&dir, rel) {
+            Some(f) => match crate::audio::analysis_cached(&dir, &f) {
+                Ok(s) => resp(200, "application/json", s.into_bytes()),
+                Err(e) => err(422, e),
+            },
+            None => err(403, ""),
+        },
+        // /work/<作品>/mixdown/<from>-<to>@<sr> : 作品の音声トラックのミックス(f32 LE、ステレオのインターリーブ)
+        "mixdown" => {
+            let parsed = rel.split_once('@').and_then(|(range, sr)| {
+                let (a, b) = range.split_once('-')?;
+                Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?, sr.parse::<u32>().ok()?))
+            });
+            let Some((from, to, sr)) = parsed else { return err(400, "形式は <from>-<to>@<sr>") };
+            let p = match workspace::read_project(&dir) {
+                Ok(p) => p,
+                Err(e) => return err(422, e),
+            };
+            match crate::audio::mixdown(&dir, &p, sr, from, to) {
+                Ok(v) => resp(200, "application/octet-stream", v.iter().flat_map(|x| x.to_le_bytes()).collect()),
+                Err(e) => err(422, e),
+            }
+        }
         "files" => match safe_join(&dir, rel) {
             Some(f) => file(&f),
             None => err(403, ""),

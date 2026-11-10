@@ -3,10 +3,12 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod clock;
 mod compile;
 mod core;
 mod export;
+mod player;
 mod scheme;
 mod workspace;
 mod wv2;
@@ -100,7 +102,16 @@ fn main() {
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("sb", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
-            std::thread::spawn(move || responder.respond(scheme::handle(&app, req)));
+            std::thread::spawn(move || {
+                // 処理がパニックしても必ず応答を返す。返さないとWebView2側の接続が詰まり、生存通知まで止まる
+                let path = req.uri().path().to_string();
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scheme::handle(&app, req)));
+                responder.respond(res.unwrap_or_else(|e| {
+                    let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                    core(&app).log("core", "error", format!("{path} の処理でパニック: {msg}"), Value::Null);
+                    tauri::http::Response::builder().status(500).body(msg.into_bytes()).unwrap()
+                }));
+            });
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -133,6 +144,25 @@ fn main() {
             c.start_clock_broadcast();
             // 確認用: --render <作品> [--format mp4|png] で書き出して終了する
             let args: Vec<String> = std::env::args().collect();
+            // 確認用: --verify <作品> <作品内のMP4> で音と映像の同期を調べて終了する
+            if let Some(i) = args.iter().position(|a| a == "--verify") {
+                let work = args.get(i + 1).cloned().unwrap_or_default();
+                let file = args.get(i + 2).cloned().unwrap_or_default();
+                let c2 = c.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let url = c2.host_url("verify", &work, "verify", &format!("&file={file}"));
+                    let r = tauri::WebviewWindowBuilder::new(&c2.app, "verify", WebviewUrl::External(url))
+                        .data_directory(c2.data.join("webview").join("export"))
+                        .additional_browser_args(core::SKETCH_ARGS)
+                        .visible(false)
+                        .build();
+                    if let Err(e) = r {
+                        eprintln!("verify: {e}");
+                        c2.app.exit(1);
+                    }
+                });
+            }
             if let Some(i) = args.iter().position(|a| a == "--render") {
                 let work = args.get(i + 1).cloned().unwrap_or_default();
                 let format = args.iter().position(|a| a == "--format").and_then(|j| args.get(j + 1).cloned()).unwrap_or_else(|| "mp4".into());

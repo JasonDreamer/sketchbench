@@ -47,6 +47,7 @@ pub struct Core {
     pub rev: AtomicU64,
     pub logs: Mutex<Vec<Value>>,
     pub jobs: Mutex<HashMap<String, export::Job>>,
+    pub player: Arc<crate::player::Player>,
     /// --render で起動したとき、書き出しが終わったら終了する
     pub exit_after_export: AtomicBool,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
@@ -74,6 +75,7 @@ impl Core {
             rev: AtomicU64::new(1),
             logs: Default::default(),
             jobs: Default::default(),
+            player: crate::player::Player::start(),
             exit_after_export: AtomicBool::new(false),
             watcher: Mutex::new(None),
         }
@@ -111,10 +113,11 @@ impl Core {
         let dir = workspace::work_dir(&self.ws, work).ok_or(format!("作品 {work} がない"))?;
         let project = workspace::read_project(&dir)?;
         self.clock.play(false);
-        self.clock.configure(project.fps_f64(), project.duration);
+        self.clock.configure(project.fps, project.duration);
         self.clock.seek(0.0);
         *self.work.lock().unwrap() = Some(work.to_string());
         self.watch(dir.clone());
+        self.rebuild_audio(dir.clone());
         self.recreate_preview("open")?;
         self.broadcast_time();
         Ok(json!({ "work": work, "project": project }))
@@ -161,8 +164,12 @@ impl Core {
                 let rev = me.rev.fetch_add(1, Ordering::SeqCst) + 1;
                 if rel.iter().any(|p| p == "project.json") {
                     if let Ok(p) = workspace::read_project(&dir) {
-                        me.clock.configure(p.fps_f64(), p.duration);
+                        me.clock.configure(p.fps, p.duration);
                     }
+                }
+                // 音声の割り当てや素材が変わったらミックスを作り直す
+                if rel.iter().any(|p| p == "project.json" || p.starts_with("assets/")) {
+                    me.rebuild_audio(dir.clone());
                 }
                 let payload = json!({ "rev": rev, "paths": rel, "unixMs": crate::clock::unix_ms() });
                 let label = me.preview_label.lock().unwrap().clone();
@@ -190,7 +197,8 @@ impl Core {
         let b = WebviewBuilder::new(&label, WebviewUrl::External(self.host_url(&label, &work, "preview", "")))
             .data_directory(self.data.join("webview").join("sketch"))
             .additional_browser_args(SKETCH_ARGS);
-        self.sketches.lock().unwrap().insert(label.clone(), SketchState { last_hb: None, phase: "loading".into() });
+        // 作成した時刻を最初の生存通知とみなす(一度も届かない場合も監視できるように)
+        self.sketches.lock().unwrap().insert(label.clone(), SketchState { last_hb: Some(Instant::now()), phase: "loading".into() });
         let wv = win
             .add_child(b, LogicalPosition::new(r.x, r.y), LogicalSize::new(r.w.max(1.0), r.h.max(1.0)))
             .map_err(|e| e.to_string())?;
@@ -204,6 +212,11 @@ impl Core {
             if let Ok(c) = wv2::core(&pw) {
                 let me2 = me.clone();
                 let _ = wv2::on_process_failed(&c, move |kind| {
+                    // ユーティリティプロセスなどは環境で共有していて、別のWebViewを閉じたときにも終わる。
+                    // このWebViewの描画に関わるものだけで作り直す
+                    if !matches!(kind, "render_exited" | "render_unresponsive" | "gpu_exited" | "browser_exited") {
+                        return;
+                    }
                     let me3 = me2.clone();
                     let l3 = l2.clone();
                     // イベントの中でWebViewを閉じないよう、別スレッドから作り直す
@@ -276,10 +289,47 @@ impl Core {
         });
     }
 
+    /// 作品の音声トラックを再生用にミックスし、解析のキャッシュも先に作っておく(別スレッド)
+    pub fn rebuild_audio(self: &Arc<Self>, dir: PathBuf) {
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let Ok(p) = workspace::read_project(&dir) else { return };
+            if p.audio.is_empty() {
+                me.player.set_buffer(Arc::new(vec![]));
+                me.clock.set_player(None);
+                return;
+            }
+            let sr = me.player.sample_rate();
+            match crate::audio::mixdown(&dir, &p, sr, 0, p.duration) {
+                Ok(mix) => {
+                    me.player.set_buffer(Arc::new(mix));
+                    me.clock.set_player(Some(me.player.clone()));
+                    let err = me.player.error.lock().unwrap().clone();
+                    match err {
+                        Some(e) => me.log("audio", "error", format!("音声を再生できない: {e}"), Value::Null),
+                        None => me.log("audio", "info", format!("音声を読み込んだ({}トラック、{} Hz、出力の遅延 {:.1} ms)", p.audio.len(), sr, me.player.latency().as_secs_f64() * 1000.0), Value::Null),
+                    }
+                }
+                Err(e) => me.log("audio", "error", format!("音声をミックスできない: {e}"), Value::Null),
+            }
+            me.broadcast_time();
+            for a in &p.audio {
+                if let Some(f) = workspace::safe_rel(&dir, &a.asset) {
+                    let t0 = std::time::Instant::now();
+                    match crate::audio::analysis_cached(&dir, &f) {
+                        Ok(_) => me.log("audio", "info", format!("{} の解析を用意した({:.1}秒)", a.asset, t0.elapsed().as_secs_f64()), Value::Null),
+                        Err(e) => me.log("audio", "error", format!("{} を解析できない: {e}", a.asset), Value::Null),
+                    }
+                }
+            }
+        });
+    }
+
     pub fn start_clock_broadcast(self: &Arc<Self>) {
         let me = self.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(16));
+            me.clock.wrap_audio();
             if me.clock.msg().playing {
                 me.broadcast_time();
             }

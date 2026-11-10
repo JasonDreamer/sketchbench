@@ -5,6 +5,7 @@ import { advanceTo } from "./clock.js";
 import { errorText, log, post, work } from "./bridge.js";
 import { rand, seed } from "./rand.js";
 import { createIsf, createRenderer, type Renderer } from "./renderers.js";
+import { loadAudio } from "./audio.js";
 
 export interface ProjectInfo {
   width: number;
@@ -12,6 +13,7 @@ export interface ProjectInfo {
   fps: [number, number];
   duration: number;
   seed?: number;
+  audio?: { asset: string; offset?: number }[];
 }
 
 interface LayerInfo {
@@ -127,7 +129,7 @@ export class Engine {
       const params = resolveParams(def, info.params);
       let state: unknown;
       try {
-        state = def.setup ? await def.setup({ width: w, height: h, p: params, assets: assetsApi(), g: renderer.g, canvas: renderer.canvas }) : undefined;
+        state = def.setup ? await def.setup({ width: w, height: h, p: params, assets: assetsApi(this.project), g: renderer.g, canvas: renderer.canvas }) : undefined;
       } catch (e) {
         if (!prev || prev.renderer !== renderer) renderer.dispose();
         throw e;
@@ -201,7 +203,7 @@ function resolveParams(def: any, overrides: Record<string, any>): Record<string,
 }
 
 /** フェーズ1のassetsは作品フォルダのファイルを読むだけ。音声・MIDIの解析はフェーズ2。 */
-function assetsApi() {
+function assetsApi(project: ProjectInfo) {
   const url = (rel: string) => `/work/${encodeURIComponent(work)}/files/assets/${rel}`;
   return {
     url,
@@ -216,6 +218,12 @@ function assetsApi() {
     },
     async json(rel: string) {
       return (await fetch(url(rel))).json();
+    },
+    /** 解析済みの音声。project.json の audio に同じファイルがあれば、その offset を作品時刻に反映する */
+    async audio(rel: string) {
+      const entry = (project.audio ?? []).find((a) => a.asset.replace(/^\.\//, "") === `assets/${rel}`);
+      const offsetSec = entry ? (entry.offset ?? 0) * project.fps[1] / project.fps[0] : 0;
+      return loadAudio(work, rel, offsetSec);
     },
     async font(family: string, rel: string) {
       const f = new FontFace(family, `url(${url(rel)})`);
