@@ -80,7 +80,7 @@ draw({ g, t }, { song }) {
 | 関数 | 内容 |
 | --- | --- |
 | `rms(t)` | 音量(0〜1) |
-| `band("low" | "mid" | "high", t)` | 帯域のエネルギー(0〜1)。low は〜200Hz、mid は200〜2000Hz、high は2000Hz〜 |
+| `band(名前, t)`(名前は "low"・"mid"・"high") | 帯域のエネルギー(0〜1)。low は〜200Hz、mid は200〜2000Hz、high は2000Hz〜 |
 | `beat(t)` | 何拍目か、拍の中の進み具合、何小節目か、小節の何拍目か |
 | `pulse(t, 減衰秒)` / `onset(t, 減衰秒)` | 直前のビート/オンセットから減衰する値 |
 | `beats` / `downbeats` / `onsets` / `bpm` | 時刻の配列と推定BPM |
