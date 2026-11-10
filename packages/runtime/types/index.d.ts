@@ -90,6 +90,8 @@ export interface AudioTrack {
 export interface Assets {
   /** 解析済みの音声(wav、mp3、flac など) */
   audio(path: string): Promise<AudioTrack>;
+  /** MIDIファイル(.mid)。offset は秒(作品時刻でのファイルの先頭) */
+  midi(path: string, opts?: { offset?: number }): Promise<MidiTrack>;
   url(path: string): string;
   image(path: string): Promise<HTMLImageElement>;
   text(path: string): Promise<string>;
@@ -106,7 +108,73 @@ export interface SetupContext<R extends RendererKind, P extends Record<string, P
   canvas: HTMLCanvasElement;
 }
 
-export interface DrawContext<R extends RendererKind, P extends Record<string, ParamDecl>> {
+/** tracks 宣言のフィールドの型(params と同じ型名) */
+export interface TrackDecl {
+  fields: Record<string, Exclude<ParamType, "curve">>;
+  /** 終了後もこの秒数だけ at() に含める */
+  tail?: number;
+}
+
+type FieldValue<T> = T extends "float" | "int" ? number : T extends "bool" ? boolean : T extends "vec2" ? [number, number] : T extends "list<text>" ? string[] : string;
+
+export interface ActiveClip<V> {
+  id: string;
+  /** フィールドの値 */
+  value: V;
+  /** クリップ開始からの経過(秒) */
+  elapsed: number;
+  /** クリップ内の進み具合(0〜1。終了後は1) */
+  progress: number;
+  /** 開始時刻順の通し番号(0から) */
+  index: number;
+  /** 終了後の経過(秒)。終了前は0 */
+  after: number;
+  start: number;
+  end: number;
+}
+
+export interface ClipTrack<V> {
+  /** 時刻tに有効なクリップ(開始時刻順、同時なら作成順)。tail の秒数だけ終了後も返す */
+  at(t: number): ActiveClip<V>[];
+  all(): ActiveClip<V>[];
+}
+
+export type Tracks<T extends Record<string, TrackDecl>> = { [K in keyof T]: ClipTrack<{ [F in keyof T[K]["fields"]]: FieldValue<T[K]["fields"][F]> }> };
+
+/** project.json の eventMap で名前を付けたイベント(MIDIのノートや時刻の一覧) */
+export interface Events {
+  /** 直前の発生からの秒数(なければ Infinity) */
+  since(name: string, t: number): number;
+  /** 時刻t以前で最後の発生 */
+  last(name: string, t: number): { time: number; index: number; velocity: number } | null;
+  /** 時刻t以前の発生回数 */
+  count(name: string, t: number): number;
+  /** [from, to) に発生した一覧 */
+  between(name: string, from: number, to: number): { time: number; index: number; velocity: number }[];
+  names(): string[];
+}
+
+export interface MidiNote { pitch: number; velocity: number; channel: number; track: number; start: number; end: number }
+export interface NoteFilter { note?: number | number[]; channel?: number; track?: number | string }
+
+/** 秒に直したMIDIファイル。値はすべて作品時刻 t(秒)で引く */
+export interface MidiTrack {
+  readonly duration: number;
+  readonly notes: readonly MidiNote[];
+  /** [時刻, BPM] */
+  readonly tempos: readonly [number, number][];
+  filter(f?: NoteFilter): MidiNote[];
+  /** 時刻tに鳴っているノート */
+  notesAt(t: number, f?: NoteFilter): (MidiNote & { elapsed: number; progress: number })[];
+  /** CCの値(0〜1)。直前の値を保つ */
+  ccAt(controller: number, t: number, opts?: { channel?: number; init?: number }): number;
+  /** 直前のノートオンからの秒数 */
+  since(f: NoteFilter, t: number): number;
+  /** ADSRのエンベロープ(0〜1、ベロシティを掛ける)。既定は attack 0、decay 0.25、sustain 0、release 0.1 */
+  envelope(f: NoteFilter, t: number, e?: { attack?: number; decay?: number; sustain?: number; release?: number }): number;
+}
+
+export interface DrawContext<R extends RendererKind, P extends Record<string, ParamDecl>, T extends Record<string, TrackDecl> = {}> {
   /** 選んだrendererのコンテキスト(Canvas2D、WebGL2、p5インスタンス) */
   g: RendererMap[R];
   /** 秒(レイヤー時刻)。書き出し時も同じ値 */
@@ -120,22 +188,34 @@ export interface DrawContext<R extends RendererKind, P extends Record<string, Pa
   /** このフレーム用に「シードとフレーム番号」で初期化した乱数 */
   rand: Rand;
   canvas: HTMLCanvasElement;
+  /** tracks 宣言のクリップトラック */
+  tracks: Tracks<T>;
+  /** eventMap の名前付きイベント */
+  events: Events;
+  /** マーカーの区間内の進み具合(0〜1)。区間の外では -1 */
+  section(name: string, t: number): number;
+  /** 拍単位の時刻(project.json の bpm と beatOffset から)。bpm がなければ NaN */
+  beats(t: number): number;
+  /** マーカーの区間(秒) */
+  markers: readonly { name: string; start: number; end: number }[];
 }
 
-export interface SketchDef<R extends RendererKind, P extends Record<string, ParamDecl>, S> {
+export interface SketchDef<R extends RendererKind, P extends Record<string, ParamDecl>, S, T extends Record<string, TrackDecl> = {}> {
   mode?: Mode;
   renderer?: R;
   params?: P;
+  /** GUIで作るクリップトラック。tracks.名前.at(t) で引く */
+  tracks?: T;
   /** 読み込み時とコード変更時に1回。戻り値は draw の第2引数に渡る */
   setup?(ctx: SetupContext<R, P>): S | Promise<S>;
   /** フレームごと。p5では g が p5 インスタンス(noLoopとredrawで駆動される) */
-  draw(ctx: DrawContext<R, P>, state: S): void | Promise<void>;
+  draw(ctx: DrawContext<R, P, T>, state: S): void | Promise<void>;
   /** ホットリロード前と終了時。イベントやGPU資源を解放する */
   dispose?(state: S): void;
 }
 
-export function defineSketch<R extends RendererKind = "canvas2d", P extends Record<string, ParamDecl> = {}, S = undefined>(
-  def: SketchDef<R, P, S>,
-): SketchDef<R, P, S>;
+export function defineSketch<R extends RendererKind = "canvas2d", P extends Record<string, ParamDecl> = {}, S = undefined, T extends Record<string, TrackDecl> = {}>(
+  def: SketchDef<R, P, S, T>,
+): SketchDef<R, P, S, T>;
 
 export const rand: Rand;

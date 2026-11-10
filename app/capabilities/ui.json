@@ -14,6 +14,12 @@
     "allow-set-preview-hidden",
     "allow-reload-preview",
     "allow-start-export",
+    "allow-edit-project",
+    "allow-undo",
+    "allow-redo",
+    "allow-midi-connect",
+    "allow-midi-record",
+    "allow-preview-still",
     "allow-reveal"
   ]
 }

@@ -192,9 +192,9 @@ fn api_project(c: &Arc<Core>, work: &str) -> Response<Vec<u8>> {
         .layers
         .iter()
         .map(|l| match workspace::sketch_entry(&dir, &l.sketch) {
-            Some((_, "isf")) => json!({ "id": l.id, "sketch": l.sketch, "kind": "isf", "url": format!("/work/{work}/isf/{}?v={rev}", l.sketch), "params": l.params }),
-            Some(_) => json!({ "id": l.id, "sketch": l.sketch, "kind": "ts", "url": format!("/work/{work}/build/{}?v={rev}", l.sketch), "params": l.params }),
-            None => json!({ "id": l.id, "sketch": l.sketch, "kind": "missing", "params": l.params }),
+            Some((_, "isf")) => json!({ "id": l.id, "sketch": l.sketch, "kind": "isf", "url": format!("/work/{work}/isf/{}?v={rev}", l.sketch), "params": l.params, "tracks": l.rest.get("tracks") }),
+            Some(_) => json!({ "id": l.id, "sketch": l.sketch, "kind": "ts", "url": format!("/work/{work}/build/{}?v={rev}", l.sketch), "params": l.params, "tracks": l.rest.get("tracks") }),
+            None => json!({ "id": l.id, "sketch": l.sketch, "kind": "missing", "params": l.params, "tracks": l.rest.get("tracks") }),
         })
         .collect();
     json_resp(json!({ "ok": true, "work": work, "project": p, "layers": layers, "rev": rev }))
@@ -230,6 +230,14 @@ fn work_file(c: &Arc<Core>, p: &str) -> Response<Vec<u8>> {
         "analysis" => match workspace::safe_rel(&dir, rel) {
             Some(f) => match crate::audio::analysis_cached(&dir, &f) {
                 Ok(s) => resp(200, "application/json", s.into_bytes()),
+                Err(e) => err(422, e),
+            },
+            None => err(403, ""),
+        },
+        // /work/<作品>/midi/<作品内の相対パス> : MIDIファイルを秒に直したノート・CC・テンポ
+        "midi" => match workspace::safe_rel(&dir, rel) {
+            Some(f) => match crate::midi::parse(&f) {
+                Ok(m) => json_resp(serde_json::to_value(m).unwrap()),
                 Err(e) => err(422, e),
             },
             None => err(403, ""),

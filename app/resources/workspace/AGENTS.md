@@ -87,6 +87,57 @@ draw({ g, t }, { song }) {
 
 `offset` は作品のフレーム数です。`t` は作品の時刻なので、offset を変えてもスケッチは書き換えずに済みます。
 
+### MIDI・イベント・マーカー・拍
+
+```ts
+async setup({ assets }) {
+  return { drums: await assets.midi("drums.mid") };   // assets/drums.mid
+},
+draw({ t, events, section, beats }, { drums }) {
+  const hit = drums.envelope({ note: 36 }, t, { decay: 0.25 }); // ノート36のADSR(0〜1)
+  const notes = drums.notesAt(t);                             // 鳴っているノート
+  const cc = drums.ccAt(1, t);                                // CC1の値(0〜1)
+  const flash = events.since("block_appear", t) < 0.2;        // eventMap の名前で引く
+  const k = section("drop", t);                               // マーカー区間内の0〜1(外は -1)
+  const beat = beats(t);                                      // bpm からの拍単位の時刻
+},
+```
+
+`project.json` に書くもの(時刻はフレーム):
+
+```json
+"bpm": 128,
+"beatOffset": 12,
+"markers": [{ "name": "intro", "start": 0 }, { "name": "drop", "start": 900, "end": 1800 }],
+"eventMap": {
+  "block_appear": { "midi": "assets/events.mid", "note": 36 },
+  "flash": { "times": [1.5, 3.0] }
+}
+```
+
+`eventMap` はノート番号と演出の名前の対応表です。割り当てを変えてもスケッチは書き換えずに済みます。
+
+### クリップトラック(歌詞・テロップなど)
+
+「どの時刻に何を」はアプリのタイムラインで作り、スケッチは宣言して読むだけにします。
+
+```ts
+export default defineSketch({
+  tracks: { words: { fields: { text: "text", color: "color" }, tail: 0.5 } },
+  draw({ g, t, tracks }) {
+    for (const c of tracks.words.at(t)) {
+      // c.value.text、c.progress(0〜1)、c.elapsed(秒)、c.after(終了後の秒)、c.index(通し番号)
+    }
+  },
+});
+```
+
+クリップは `project.json` の `layers[].tracks.words` に id をキーにして入ります。JSONで直接足すときは配列で書けば、アプリが id を振ります(`{ "start": 120, "end": 180, "value": { "text": "あ" } }`)。
+
+### MIDIコントローラーでparamsを動かす
+
+`project.json` の `ccMap` に `"レイヤー.param": { "cc": 1, "min": 0, "max": 1 }` を書くか、アプリの「MIDI」→「学習」で割り当てます。プレビュー中はコントローラーの値で動き、録音すると `source` に録音ファイルが入り、書き出しではその値を使います。スケッチからライブのMIDI入力は直接読めません(書き出しで結果が変わるため)。
+
 ### シェーダー(ISF)
 
 `sketch.ts` の代わりに `shader.fs` を置くとシェーダーモードになります。先頭のJSONで入力を宣言し、`TIME`、`RENDERSIZE`、`FRAMEINDEX`、`isf_FragNormCoord` が使えます。今は単一パスで、入力型は float、bool、long、color、point2D、event だけです。

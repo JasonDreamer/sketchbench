@@ -13,6 +13,9 @@ pub struct Player {
     /// 次にコールバックへ渡すサンプル位置(フレーム単位)
     pos: AtomicU64,
     playing: AtomicBool,
+    /// スクラブ: 止まっていてもこのサンプル位置までは鳴らす
+    scrub_end: AtomicU64,
+    scrub_pos: AtomicU64,
     buf: Mutex<Arc<Vec<f32>>>,
     /// 最後のコールバックの時刻と、その時点で書き始めた位置
     last: Mutex<Option<(Instant, u64)>>,
@@ -27,6 +30,8 @@ impl Player {
             sr: AtomicU64::new(48000),
             pos: AtomicU64::new(0),
             playing: AtomicBool::new(false),
+            scrub_end: AtomicU64::new(0),
+            scrub_pos: AtomicU64::new(0),
             buf: Mutex::new(Arc::new(vec![])),
             last: Mutex::new(None),
             latency_ns: AtomicU64::new(0),
@@ -63,6 +68,13 @@ impl Player {
             self.pos.store((s * self.sample_rate() as f64).max(0.0) as u64, Ordering::SeqCst);
         }
         self.playing.store(on, Ordering::SeqCst);
+    }
+
+    /// 止まっている位置から secs 秒だけ鳴らす
+    pub fn scrub(&self, secs: f64) {
+        let pos = self.pos.load(Ordering::SeqCst);
+        self.scrub_pos.store(pos, Ordering::SeqCst);
+        self.scrub_end.store(pos + (secs * self.sample_rate() as f64) as u64, Ordering::SeqCst);
     }
 
     pub fn seek_secs(&self, s: f64) {
@@ -110,11 +122,15 @@ fn run(p: Arc<Player>) -> Result<(), String> {
                     p2.latency_ns.store(lat.as_nanos() as u64, Ordering::SeqCst);
                 }
                 let frames = data.len() / channels;
-                if !p2.playing.load(Ordering::SeqCst) {
+                let playing = p2.playing.load(Ordering::SeqCst);
+                let scrub_end = p2.scrub_end.load(Ordering::SeqCst);
+                let scrub_pos = p2.scrub_pos.load(Ordering::SeqCst);
+                if !playing && scrub_pos >= scrub_end {
                     data.fill(0.0);
                     return;
                 }
-                let start = p2.pos.fetch_add(frames as u64, Ordering::SeqCst);
+                // スクラブは別の位置で進め、止まっている位置(pos)は変えない
+                let start = if playing { p2.pos.fetch_add(frames as u64, Ordering::SeqCst) } else { p2.scrub_pos.fetch_add(frames as u64, Ordering::SeqCst) };
                 *p2.last.lock().unwrap() = Some((Instant::now(), start));
                 let buf = p2.buf.lock().unwrap().clone();
                 for i in 0..frames {

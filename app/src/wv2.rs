@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
-use webview2_com::ProcessFailedEventHandler;
+use webview2_com::{CapturePreviewCompletedHandler, ProcessFailedEventHandler};
+use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows_core::{Interface, HSTRING};
 
 pub fn core(pw: &tauri::webview::PlatformWebview) -> windows_core::Result<ICoreWebView2> {
@@ -67,4 +69,29 @@ pub fn release_shared_buffer(key: &str) {
             let _ = unsafe { b.Close() };
         }
     });
+}
+
+/// CapturePreviewでPNGを撮る(メニューやダイアログの間、子WebViewの代わりに出す静止画)。cbはメインスレッドで呼ばれる
+pub fn capture_png(core: &ICoreWebView2, cb: impl FnOnce(Result<Vec<u8>, String>) + 'static) -> windows_core::Result<()> {
+    let stream = unsafe { CreateStreamOnHGlobal(Default::default(), true)? };
+    let s2 = stream.clone();
+    let handler = CapturePreviewCompletedHandler::create(Box::new(move |hr| {
+        let r = match hr {
+            Err(e) => Err(format!("{e}")),
+            Ok(()) => unsafe {
+                match GetHGlobalFromStream(&s2) {
+                    Err(e) => Err(format!("{e}")),
+                    Ok(h) => {
+                        let p = GlobalLock(h) as *const u8;
+                        let v = std::slice::from_raw_parts(p, GlobalSize(h)).to_vec();
+                        let _ = GlobalUnlock(h);
+                        Ok(v)
+                    }
+                }
+            },
+        };
+        cb(r);
+        Ok(())
+    }));
+    unsafe { core.CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, &stream, &handler) }
 }

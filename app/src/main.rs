@@ -7,7 +7,10 @@ mod audio;
 mod clock;
 mod compile;
 mod core;
+mod edit;
 mod export;
+mod midi;
+mod midi_live;
 mod player;
 mod scheme;
 mod workspace;
@@ -36,9 +39,35 @@ fn get_state(app: AppHandle) -> CmdResult {
         // 起動時に開く作品(--open <作品>)。UIは未指定なら一覧の先頭を開く
         "initialWork": std::env::args().skip_while(|a| a != "--open" && a != "--render").nth(1),
         "project": project,
+        // スケッチが setup 成功時に送った宣言(params・tracks の型)。タイムラインとインスペクタが使う
+        "declarations": work.as_ref().and_then(|w| workspace::work_dir(&c.ws, w)).map(|d| read_declarations(&d)).unwrap_or(Value::Null),
         "time": c.clock.msg(),
         "logs": *c.logs.lock().unwrap(),
     }))
+}
+
+/// UI WebView。開発ビルドで SB_DEBUG_PORT があれば、CDPで操作できるようリモートデバッグを開く
+/// (動作確認で実際のマウスやキーを送らずに済むように)
+fn ui_builder(c: &Core) -> WebviewBuilder<tauri::Wry> {
+    let b = WebviewBuilder::new("ui", WebviewUrl::App("index.html".into())).data_directory(c.data.join("webview").join("ui")).auto_resize();
+    match std::env::var("SB_DEBUG_PORT") {
+        Ok(port) if cfg!(debug_assertions) => b.data_directory(c.data.join("webview").join("ui-debug")).additional_browser_args(&format!("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port={port}")),
+        _ => b,
+    }
+}
+
+/// .cache/declarations/ の宣言を、スケッチのパス(sketches/main など)をキーにして返す
+fn read_declarations(dir: &std::path::Path) -> Value {
+    let mut m = serde_json::Map::new();
+    if let Ok(rd) = std::fs::read_dir(dir.join(".cache").join("declarations")) {
+        for e in rd.flatten() {
+            let name = e.path().file_stem().map(|s| s.to_string_lossy().replace('_', "/")).unwrap_or_default();
+            if let Ok(s) = std::fs::read_to_string(e.path()) {
+                m.insert(name, serde_json::from_str::<Value>(&s).unwrap_or(Value::Null));
+            }
+        }
+    }
+    Value::Object(m)
 }
 
 #[tauri::command]
@@ -62,9 +91,13 @@ fn play(app: AppHandle, playing: bool) -> CmdResult {
 }
 
 #[tauri::command]
-fn seek(app: AppHandle, frame: f64) -> CmdResult {
+fn seek(app: AppHandle, frame: f64, scrub: Option<bool>) -> CmdResult {
     let c = core(&app);
     c.clock.seek(frame);
+    // 止まっているときのシークは短く音を鳴らして位置を耳で確かめられるようにする(スクラブ)
+    if scrub.unwrap_or(false) && !c.clock.msg().playing {
+        c.player.scrub(0.08);
+    }
     c.broadcast_time();
     Ok(Value::Null)
 }
@@ -90,6 +123,70 @@ async fn reload_preview(app: AppHandle) -> CmdResult {
 #[tauri::command]
 async fn start_export(app: AppHandle, options: export::ExportOptions) -> CmdResult {
     export::start(&core(&app), options)
+}
+
+/// project.json を操作で書き換える(取り消し1単位)
+#[tauri::command]
+fn edit_project(app: AppHandle, op: edit::Op) -> CmdResult {
+    let c = core(&app);
+    let dir = c.work_dir()?;
+    c.editor.apply(&dir, op)
+}
+
+#[tauri::command]
+fn undo(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    let dir = c.work_dir()?;
+    Ok(json!({ "label": c.editor.undo(&dir)? }))
+}
+
+#[tauri::command]
+fn redo(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    let dir = c.work_dir()?;
+    Ok(json!({ "label": c.editor.redo(&dir)? }))
+}
+
+/// MIDI入力を開き直し、ポートと録音の状態を返す
+#[tauri::command]
+async fn midi_connect(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    let ports = c.live.connect_all(c.clone())?;
+    Ok(json!({ "ports": ports, "recording": c.live.is_recording() }))
+}
+
+/// 録音の開始と終了。終了時は書いた .mid のパス(作品内の相対パス)を返す
+#[tauri::command]
+fn midi_record(app: AppHandle, on: bool) -> CmdResult {
+    let c = core(&app);
+    if on {
+        c.live.start_recording();
+        return Ok(json!({ "recording": true }));
+    }
+    let dir = c.work_dir()?;
+    let file = c.live.stop_recording(&dir)?;
+    if let Some(f) = &file {
+        c.log("midi", "info", format!("MIDIを録音した: {f}"), Value::Null);
+    }
+    Ok(json!({ "recording": false, "file": file }))
+}
+
+/// プレビューの静止画(PNG)。子WebViewを隠す間、UIがこれを代わりに出す
+#[tauri::command]
+async fn preview_still(app: AppHandle) -> Result<tauri::ipc::Response, String> {
+    let c = core(&app);
+    let label = c.preview_label.lock().unwrap().clone();
+    let wv = app.get_webview(&label).ok_or("プレビューがない")?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    wv.with_webview(move |pw| {
+        let r = wv2::core(&pw).and_then(|core| wv2::capture_png(&core, move |r| { let _ = tx.send(r); }));
+        if let Err(e) = r {
+            eprintln!("capture: {e}");
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    let png = tokio::time::timeout(std::time::Duration::from_secs(3), rx).await.map_err(|_| "静止画の取得が時間切れ")?.map_err(|e| e.to_string())??;
+    Ok(tauri::ipc::Response::new(png))
 }
 
 #[tauri::command]
@@ -123,6 +220,12 @@ fn main() {
             set_preview_hidden,
             reload_preview,
             start_export,
+            edit_project,
+            undo,
+            redo,
+            midi_connect,
+            midi_record,
+            preview_still,
             reveal
         ])
         .setup(|app| {
@@ -134,9 +237,7 @@ fn main() {
             let win = tauri::window::WindowBuilder::new(app, "main").title("Sketchbench").inner_size(1600.0, 960.0).build()?;
             let size = win.inner_size()?.to_logical::<f64>(win.scale_factor()?);
             win.add_child(
-                WebviewBuilder::new("ui", WebviewUrl::App("index.html".into()))
-                    .data_directory(c.data.join("webview").join("ui"))
-                    .auto_resize(),
+                ui_builder(&c),
                 LogicalPosition::new(0.0, 0.0),
                 size,
             )?;

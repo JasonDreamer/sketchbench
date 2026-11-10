@@ -6,6 +6,8 @@ import { errorText, log, post, work } from "./bridge.js";
 import { rand, seed } from "./rand.js";
 import { createIsf, createRenderer, type Renderer } from "./renderers.js";
 import { loadAudio } from "./audio.js";
+import { makeTracks } from "./tracks.js";
+import { beatsFn, clearMidiCache, Events, fetchMidi, loadMidi, makeMarkers, MidiTrack, sectionFn, type MarkerInfo } from "./midi.js";
 
 export interface ProjectInfo {
   width: number;
@@ -14,7 +16,15 @@ export interface ProjectInfo {
   duration: number;
   seed?: number;
   audio?: { asset: string; offset?: number }[];
+  eventMap?: Record<string, any>;
+  ccMap?: Record<string, CcMapEntry>;
+  markers?: any[];
+  bpm?: number;
+  beatOffset?: number;
 }
+
+/** project.json の ccMap: { "レイヤー.param": { cc, channel?, min?, max?, source? } } */
+interface CcMapEntry { cc: number; channel?: number; min?: number; max?: number; source?: string }
 
 interface LayerInfo {
   id: string;
@@ -22,6 +32,7 @@ interface LayerInfo {
   kind: "ts" | "isf" | "missing";
   url?: string;
   params: Record<string, any>;
+  tracks?: Record<string, any>;
 }
 
 interface Loaded {
@@ -30,6 +41,7 @@ interface Loaded {
   renderer: Renderer;
   state: unknown;
   params: Record<string, any>;
+  tracks: Record<string, any>;
   failedAt: number;
 }
 
@@ -42,6 +54,14 @@ export class Engine {
   host: HTMLElement;
   lastFrame = -1;
   rev = 0;
+  events = new Events(new Map());
+  markers: MarkerInfo[] = [];
+  section = sectionFn([]);
+  beats = beatsFn(undefined, undefined, 30);
+  /** CC割り当て。プレビュー中はライブの値(live)、なければ録音ファイル(source)の値を使う */
+  ccMap: { layer: string; param: string; e: CcMapEntry; track: MidiTrack | null }[] = [];
+  /** ライブのCCの値("channel:cc" → 0〜1)。プレビューのときだけ入る */
+  liveCc = new Map<string, number>();
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -69,6 +89,29 @@ export class Engine {
       this.output.height = p.height;
       for (const id of [...this.layers.keys()]) this.drop(id);
     }
+    // イベント対応表・マーカー・BPM(作品時刻で引く関数)
+    clearMidiCache();
+    try {
+      this.events = await Events.load(work, p.eventMap);
+    } catch (e) {
+      log("error", `eventMap を読めない: ${errorText(e)}`);
+    }
+    this.markers = makeMarkers(p.markers, this.fps, p.duration);
+    this.section = sectionFn(this.markers);
+    this.beats = beatsFn(p.bpm, p.beatOffset, this.fps);
+    this.ccMap = [];
+    for (const [key, e] of Object.entries(p.ccMap ?? {})) {
+      const [layer, param] = key.split(".");
+      let track: MidiTrack | null = null;
+      if (e.source) {
+        try {
+          track = new MidiTrack(await fetchMidi(work, e.source.replace(/^\.\//, "")), 0);
+        } catch (err) {
+          log("error", `ccMap の ${key}: ${errorText(err)}`);
+        }
+      }
+      this.ccMap.push({ layer, param, e, track });
+    }
     const infos = res.layers as LayerInfo[];
     this.order = infos.map((l) => l.id);
     for (const id of [...this.layers.keys()]) if (!this.order.includes(id)) this.drop(id);
@@ -82,6 +125,7 @@ export class Engine {
       }
       if (cur && cur.url === info.url) {
         cur.params = resolveParams(cur.def, info.params);
+        cur.tracks = makeTracks(cur.def.tracks, info.tracks, this.fps);
         continue;
       }
       ok = (await this.loadLayer(info, cur)) && ok;
@@ -143,7 +187,7 @@ export class Engine {
         }
         if (prev.renderer !== renderer) prev.renderer.dispose();
       }
-      this.layers.set(info.id, { url: info.url!, def, renderer, state, params, failedAt: -1 });
+      this.layers.set(info.id, { url: info.url!, def, renderer, state, params, tracks: makeTracks(def.tracks, info.tracks, this.fps), failedAt: -1 });
       post(`/declare?work=${encodeURIComponent(work)}&sketch=${encodeURIComponent(info.sketch)}`, JSON.stringify({
         mode: def.mode ?? "sequential", renderer: def.renderer ?? (info.kind === "isf" ? "shader" : "canvas2d"), params: def.params ?? null, tracks: def.tracks ?? null,
       })).catch(() => {});
@@ -156,6 +200,19 @@ export class Engine {
     }
   }
 
+  /** CC割り当てを反映した params */
+  private paramsAt(layer: string, base: Record<string, any>, t: number): Record<string, any> {
+    const maps = this.ccMap.filter((m) => m.layer === layer);
+    if (maps.length === 0) return base;
+    const out = { ...base };
+    for (const m of maps) {
+      const live = this.liveCc.get(`${m.e.channel ?? "*"}:${m.e.cc}`) ?? this.liveCc.get(`*:${m.e.cc}`);
+      const v = live ?? (m.track ? m.track.ccAt(m.e.cc, t, { channel: m.e.channel, init: NaN }) : NaN);
+      if (Number.isFinite(v)) out[m.param] = (m.e.min ?? 0) + v * ((m.e.max ?? 1) - (m.e.min ?? 0));
+    }
+    return out;
+  }
+
   /** 1フレーム描いて出力canvasに合成する。 */
   async render(frame: number) {
     const t = frame / this.fps;
@@ -166,8 +223,9 @@ export class Engine {
       const l = this.layers.get(id);
       if (!l) continue;
       seed(this.project.seed ?? 0, frame);
+      const p = this.paramsAt(id, l.params, t);
       try {
-        await l.renderer.frame(() => l.def.draw({ g: l.renderer.g, t, frame, width, height, p: l.params, rand, canvas: l.renderer.canvas }, l.state));
+        await l.renderer.frame(() => l.def.draw({ g: l.renderer.g, t, frame, width, height, p, rand, canvas: l.renderer.canvas, events: this.events, section: this.section, beats: this.beats, markers: this.markers, tracks: l.tracks }, l.state));
         l.failedAt = -1;
       } catch (e) {
         if (l.failedAt < 0) log("error", `draw で例外(frame ${frame}): ${errorText(e)}`);
@@ -224,6 +282,10 @@ function assetsApi(project: ProjectInfo) {
       const entry = (project.audio ?? []).find((a) => a.asset.replace(/^\.\//, "") === `assets/${rel}`);
       const offsetSec = entry ? (entry.offset ?? 0) * project.fps[1] / project.fps[0] : 0;
       return loadAudio(work, rel, offsetSec);
+    },
+    /** MIDIファイル。offset は秒(作品時刻でのファイルの先頭) */
+    async midi(rel: string, opts: { offset?: number } = {}) {
+      return loadMidi(work, rel, opts.offset ?? 0);
     },
     async font(family: string, rel: string) {
       const f = new FontFace(family, `url(${url(rel)})`);

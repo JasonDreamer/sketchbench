@@ -23,6 +23,13 @@ async function preview() {
     time = m;
     if (!m.playing) dirty = true;
   });
+  // ライブMIDI: CC割り当てだけに使う(プレビューのみ。書き出しは録音ファイルの値)
+  await listen("sb:midi", (m: { type: string; channel: number; controller: number; value: number }) => {
+    if (m.type !== "cc") return;
+    engine.liveCc.set(`${m.channel}:${m.controller}`, m.value);
+    engine.liveCc.set(`*:${m.controller}`, m.value);
+    dirty = true;
+  });
   await listen("sb:reload", (m: { unixMs: number }) => {
     reloadPending = true;
     reloadDetectedAt = m.unixMs;
@@ -118,8 +125,8 @@ async function exportJob() {
           else throw new Error(`${width}x${height} をH.264でもAV1でもエンコードできない(ffmpeg経由はフェーズ5)`);
         }
         const writable = new WritableStream({
-          async write(chunk: { data: Uint8Array; position: number }) {
-            const r = await fetch(`/export/write?job=${job}&pos=${chunk.position}`, { method: "POST", body: chunk.data });
+          async write(chunk: { data: Uint8Array<ArrayBuffer>; position: number }) {
+            const r = await fetch(`/export/write?job=${job}&pos=${chunk.position}`, { method: "POST", body: chunk.data as Uint8Array<ArrayBuffer> });
             if (!r.ok) throw new Error(`書き込み失敗: ${await r.text()}`);
           },
         });
@@ -154,8 +161,13 @@ async function exportJob() {
       }
     }
     let n = 0;
+    // 内訳(ms): 描画と、エンコード・送信
+    let tRender = 0, tOut = 0;
     for (const f of frames) {
+      const t0 = real.performanceNow();
       await engine.render(f);
+      const t1 = real.performanceNow();
+      tRender += t1 - t0;
       if (format === "mp4") {
         await withRealTimers(() => source.add((f - from) * frameDur, frameDur));
         // 映像の進みに合わせて、1秒ぶんずつ音声を送る
@@ -175,9 +187,11 @@ async function exportJob() {
         const r = await post(`/export/frame?job=${job}&i=${f}`);
         if (!r.ok) throw new Error(`フレーム送信失敗: ${await r.text()}`);
       }
+      tOut += real.performanceNow() - t1;
       n++;
       if (n % 10 === 0) post(`/export/progress?job=${job}&done=${n}`).catch(() => {});
     }
+    log("info", `書き出しの内訳: 描画 ${(tRender / n).toFixed(1)} ms/フレーム、エンコード・送信 ${(tOut / n).toFixed(1)} ms/フレーム(${n}フレーム)`);
     if (output) await withRealTimers(() => output.finalize());
     if (sharedView) (window as any).chrome.webview.releaseBuffer(sharedView.buffer);
     await post(`/export/done?job=${job}`);

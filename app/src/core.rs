@@ -48,6 +48,8 @@ pub struct Core {
     pub logs: Mutex<Vec<Value>>,
     pub jobs: Mutex<HashMap<String, export::Job>>,
     pub player: Arc<crate::player::Player>,
+    pub editor: crate::edit::Editor,
+    pub live: crate::midi_live::LiveMidi,
     /// --render で起動したとき、書き出しが終わったら終了する
     pub exit_after_export: AtomicBool,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
@@ -76,9 +78,16 @@ impl Core {
             logs: Default::default(),
             jobs: Default::default(),
             player: crate::player::Player::start(),
+            editor: Default::default(),
+            live: Default::default(),
             exit_after_export: AtomicBool::new(false),
             watcher: Mutex::new(None),
         }
+    }
+
+    pub fn work_dir(&self) -> Result<PathBuf, String> {
+        let w = self.work.lock().unwrap().clone().ok_or("作品が開かれていない")?;
+        workspace::work_dir(&self.ws, &w).ok_or(format!("作品 {w} がない"))
     }
 
     pub fn next_id(&self) -> u64 {
@@ -116,6 +125,8 @@ impl Core {
         self.clock.configure(project.fps, project.duration);
         self.clock.seek(0.0);
         *self.work.lock().unwrap() = Some(work.to_string());
+        self.editor.clear();
+        let _ = self.editor.normalize_ids(&dir);
         self.watch(dir.clone());
         self.rebuild_audio(dir.clone());
         self.recreate_preview("open")?;
@@ -163,6 +174,10 @@ impl Core {
                 }
                 let rev = me.rev.fetch_add(1, Ordering::SeqCst) + 1;
                 if rel.iter().any(|p| p == "project.json") {
+                    // 外から書かれたidのないクリップに採番する(書き戻しでもう一度ここに来る)
+                    if me.editor.normalize_ids(&dir).unwrap_or(false) {
+                        continue;
+                    }
                     if let Ok(p) = workspace::read_project(&dir) {
                         me.clock.configure(p.fps, p.duration);
                     }
