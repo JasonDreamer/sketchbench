@@ -20,6 +20,9 @@
     "allow-midi-connect",
     "allow-midi-record",
     "allow-preview-still",
+    "allow-set-ui-context",
+    "allow-list-history",
+    "allow-restore-history",
     "allow-reveal"
   ]
 }

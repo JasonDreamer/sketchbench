@@ -35,6 +35,12 @@ pub enum Op {
     SetEventMap { event_map: Value },
     #[serde(rename_all = "camelCase")]
     SetCcMap { cc_map: Value },
+    /// スケッチを置いたレイヤーを末尾に足す(作品全体の長さ)
+    AddLayer { sketch: String },
+    /// レイヤー構成を丸ごと置き換える
+    SetLayers { layers: Vec<Value> },
+    /// クリップを差分で変える(MCPの set_clips)。1回が取り消し1単位
+    SetClips { layer: String, track: String, add: Vec<Value>, update: Vec<Value>, delete: Vec<String>, replace: bool },
 }
 
 impl Op {
@@ -49,11 +55,15 @@ impl Op {
             Op::SetParam { name, .. } => format!("{name} を変更"),
             Op::SetEventMap { .. } => "イベント対応表を変更".into(),
             Op::SetCcMap { .. } => "CC割り当てを変更".into(),
+            Op::AddLayer { sketch } => format!("{sketch} のレイヤーを追加"),
+            Op::SetLayers { layers } => format!("レイヤー構成を{}個に置き換え", layers.len()),
+            Op::SetClips { add, update, delete, replace, .. } => format!("クリップを変更(追加{} 変更{} 削除{}{})", add.len(), update.len(), delete.len(), if *replace { "、全置換" } else { "" }),
         }
     }
 }
 
 struct Step {
+    dir: std::path::PathBuf,
     label: String,
     before: String,
     after: String,
@@ -186,18 +196,79 @@ impl Editor {
             }
             Op::SetEventMap { event_map } => v["eventMap"] = event_map,
             Op::SetCcMap { cc_map } => v["ccMap"] = cc_map,
+            Op::AddLayer { sketch } => {
+                let dur = v["duration"].as_i64().unwrap_or(300);
+                let ls = v["layers"].as_array_mut().ok_or("layers がない")?;
+                let mut n = ls.len() + 1;
+                while ls.iter().any(|l| l["id"] == format!("L{n}")) {
+                    n += 1;
+                }
+                let id = format!("L{n}");
+                ls.push(json!({ "id": id, "sketch": sketch, "start": 0, "end": dur, "offset": 0, "speed": 1, "blend": "normal", "opacity": 1, "params": {} }));
+                result = json!({ "layer": id });
+            }
+            Op::SetLayers { layers } => {
+                for l in &layers {
+                    if l["id"].as_str().is_none() || l["sketch"].as_str().is_none() {
+                        return Err("各レイヤーに id と sketch が要る".into());
+                    }
+                }
+                v["layers"] = json!(layers);
+            }
+            Op::SetClips { layer, track, add, update, delete, replace } => {
+                let mut ids = vec![];
+                let fresh: Vec<(String, Value)> = add
+                    .into_iter()
+                    .map(|c| {
+                        let id = self.new_id();
+                        ids.push(id.clone());
+                        let start = c["start"].as_i64().unwrap_or(0);
+                        let end = c["end"].as_i64().unwrap_or(start + 1).max(start + 1);
+                        (id, json!({ "start": start, "end": end, "value": c.get("value").cloned().unwrap_or(json!({})) }))
+                    })
+                    .collect();
+                let t = track_mut(&mut v, &layer, &track)?;
+                if replace {
+                    t.clear();
+                }
+                for id in &delete {
+                    t.shift_remove(id);
+                }
+                for u in update {
+                    let id = u["id"].as_str().ok_or("update の各要素に id が要る")?.to_string();
+                    let c = t.get_mut(&id).and_then(|c| c.as_object_mut()).ok_or(format!("クリップ {id} がない"))?;
+                    for k in ["start", "end"] {
+                        if let Some(x) = u.get(k).and_then(|x| x.as_i64()) {
+                            c.insert(k.into(), json!(x));
+                        }
+                    }
+                    if let Some(val) = u.get("value").and_then(|x| x.as_object()) {
+                        let cur = c.entry("value").or_insert_with(|| json!({}));
+                        if let Some(obj) = cur.as_object_mut() {
+                            for (k, x) in val {
+                                obj.insert(k.clone(), x.clone());
+                            }
+                        }
+                    }
+                }
+                for (id, c) in fresh {
+                    t.insert(id, c);
+                }
+                result = json!({ "added": ids });
+            }
         }
         let after = write(dir, &v)?;
-        self.undo.lock().unwrap().push(Step { label: label.clone(), before, after });
+        self.undo.lock().unwrap().push(Step { dir: dir.to_path_buf(), label: label.clone(), before, after });
         self.redo.lock().unwrap().clear();
         result["label"] = json!(label);
         Ok(result)
     }
 
     /// 取り消し。ファイルが外から書き換わっていたら、その上には戻さない
-    pub fn undo(&self, dir: &Path) -> Result<String, String> {
+    pub fn undo(&self, _dir: &Path) -> Result<String, String> {
         let step = self.undo.lock().unwrap().pop().ok_or("取り消せる操作がない")?;
-        let (cur, _) = read(dir)?;
+        let dir = step.dir.clone();
+        let (cur, _) = read(&dir)?;
         if cur != step.after {
             return Err("project.json が外で書き換わったので、この操作は取り消せない".into());
         }
@@ -207,9 +278,10 @@ impl Editor {
         Ok(label)
     }
 
-    pub fn redo(&self, dir: &Path) -> Result<String, String> {
+    pub fn redo(&self, _dir: &Path) -> Result<String, String> {
         let step = self.redo.lock().unwrap().pop().ok_or("やり直せる操作がない")?;
-        let (cur, _) = read(dir)?;
+        let dir = step.dir.clone();
+        let (cur, _) = read(&dir)?;
         if cur != step.before {
             return Err("project.json が外で書き換わったので、やり直せない".into());
         }

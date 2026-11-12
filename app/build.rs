@@ -15,6 +15,9 @@ const COMMANDS: &[&str] = &[
     "midi_connect",
     "midi_record",
     "preview_still",
+    "set_ui_context",
+    "list_history",
+    "restore_history",
     "reveal",
 ];
 

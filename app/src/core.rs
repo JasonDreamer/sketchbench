@@ -50,6 +50,17 @@ pub struct Core {
     pub player: Arc<crate::player::Player>,
     pub editor: crate::edit::Editor,
     pub live: crate::midi_live::LiveMidi,
+    /// 人がアプリで指し示しているもの(UIが送る)。MCPの get_ui_context が返す
+    pub ui_context: Mutex<Value>,
+    /// 描画時間(スケッチWebViewが送る)
+    pub frame_stats: Mutex<Value>,
+    /// 5秒止まったらコミットする変更(作品, 作者, 最後の変更時刻)
+    pub pending_commit: Mutex<HashMap<String, (String, Instant)>>,
+    works_watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// 作品ごとの最後の描画ジョブのラベル(get_diagnostics がそのログだけを返す)
+    pub last_render: Mutex<HashMap<String, String>>,
+    /// 最後にスケッチを読み込み直した時刻(UNIX ms)。プレビューのログはこれ以降だけを返す
+    pub last_reload_ms: Mutex<f64>,
     /// --render で起動したとき、書き出しが終わったら終了する
     pub exit_after_export: AtomicBool,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
@@ -80,6 +91,12 @@ impl Core {
             player: crate::player::Player::start(),
             editor: Default::default(),
             live: Default::default(),
+            ui_context: Mutex::new(Value::Null),
+            frame_stats: Mutex::new(Value::Null),
+            pending_commit: Default::default(),
+            works_watcher: Mutex::new(None),
+            last_render: Default::default(),
+            last_reload_ms: Mutex::new(0.0),
             exit_after_export: AtomicBool::new(false),
             watcher: Mutex::new(None),
         }
@@ -97,7 +114,11 @@ impl Core {
     /// ログと診断。UIへも送る。
     pub fn log(&self, source: &str, level: &str, message: impl Into<String>, extra: Value) {
         let v = json!({ "source": source, "level": level, "message": message.into(), "extra": extra, "unixMs": crate::clock::unix_ms() });
-        println!("[{level}] {source}: {}", v["message"].as_str().unwrap_or(""));
+        // 標準出力が閉じていても落ちないよう、書けなければ捨てる(println! は失敗するとパニックする)
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stdout(), "[{level}] {source}: {}", v["message"].as_str().unwrap_or(""));
+        }
         let mut logs = self.logs.lock().unwrap();
         logs.push(v.clone());
         let n = logs.len();
@@ -126,6 +147,7 @@ impl Core {
         self.clock.seek(0.0);
         *self.work.lock().unwrap() = Some(work.to_string());
         self.editor.clear();
+        *self.last_reload_ms.lock().unwrap() = crate::clock::unix_ms();
         let _ = self.editor.normalize_ids(&dir);
         self.watch(dir.clone());
         self.rebuild_audio(dir.clone());
@@ -172,6 +194,13 @@ impl Core {
                 if rel.is_empty() {
                     continue;
                 }
+                if rel.iter().any(|p| p == "project.json") {
+                    let v = crate::schema::validate(&dir);
+                    for e in v["errors"].as_array().into_iter().flatten().take(5) {
+                        me.log("project", "error", format!("project.json: {}", e.as_str().unwrap_or("")), Value::Null);
+                    }
+                }
+                *me.last_reload_ms.lock().unwrap() = crate::clock::unix_ms();
                 let rev = me.rev.fetch_add(1, Ordering::SeqCst) + 1;
                 if rel.iter().any(|p| p == "project.json") {
                     // 外から書かれたidのないクリップに採番する(書き戻しでもう一度ここに来る)
@@ -338,6 +367,36 @@ impl Core {
                 }
             }
         });
+    }
+
+    /// works/ 全体を見張り、直接編集(AIや外部エディタ)を作品ごとに「5秒止まったら1コミット」にする。
+    /// 作者は区別できないので「外部編集」
+    pub fn watch_works_for_history(self: &Arc<Self>) {
+        use notify::{RecursiveMode, Watcher};
+        let works = self.ws.join("works");
+        let me = self.clone();
+        let w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+            let Ok(ev) = ev else { return };
+            if matches!(ev.kind, notify::EventKind::Access(_)) {
+                return;
+            }
+            for p in ev.paths {
+                let Ok(rel) = p.strip_prefix(me.ws.join("works")) else { continue };
+                let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string());
+                let (Some(work), Some(second)) = (parts.next(), parts.next()) else { continue };
+                if second == ".cache" || second == "renders" || second.ends_with(".tmp") {
+                    continue;
+                }
+                crate::history::touch(&me, &work, "外部編集");
+            }
+        });
+        match w {
+            Ok(mut w) => {
+                let _ = w.watch(&works, RecursiveMode::Recursive);
+                *self.works_watcher.lock().unwrap() = Some(w);
+            }
+            Err(e) => self.log("history", "warn", format!("works/ を見張れない: {e}"), Value::Null),
+        }
     }
 
     pub fn start_clock_broadcast(self: &Arc<Self>) {

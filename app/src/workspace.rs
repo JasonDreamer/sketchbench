@@ -218,3 +218,24 @@ pub fn local_stamp() -> String {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     format!("{:04}{:02}{:02}-{:02}{:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
+
+/// テンプレートの最初のスケッチを、作品の sketches/<name> に写す。戻り値はスケッチのパス
+pub fn add_sketch(ws: &Path, work_dir: &Path, template: &str, name: &str) -> Result<String, String> {
+    let valid = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err("スケッチ名は英数字・-・_ だけにする".into());
+    }
+    let src_root = ws.join("templates").join(template).join("sketches");
+    let src = std::fs::read_dir(&src_root)
+        .map_err(|_| format!("テンプレート {template} にスケッチがない"))?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .ok_or(format!("テンプレート {template} にスケッチがない"))?;
+    let dst = work_dir.join("sketches").join(name);
+    if dst.exists() {
+        return Err(format!("sketches/{name} は既にある"));
+    }
+    copy_tree(&src, &dst, &|_| false).map_err(|e| e.to_string())?;
+    Ok(format!("sketches/{name}"))
+}

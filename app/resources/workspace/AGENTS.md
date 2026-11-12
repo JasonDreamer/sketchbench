@@ -160,6 +160,38 @@ export default defineSketch({
 
 新しい作品は、テンプレートのフォルダを `works/<作品名>/` に複製して作ります(アプリの「新規」でも同じことができます)。
 
-## 確かめ方
+## 確かめ方(MCP)
 
-保存するとアプリのプレビューに反映されます。変換エラーや実行時の例外はアプリのコンソールに出ます。描画結果を画像で確かめる仕組み(MCPの `render_frames`)は今後追加します。
+Sketchbench のMCPサーバー(`sketchbench`)につながっていれば、人の操作なしに確かめられます。スケッチを直したら、完了を報告する前に必ず次を行ってください。
+
+1. `get_diagnostics`: 変換エラー、型エラー(TypeScript 7)、project.json の検証エラー、実行時の例外、描画時間
+2. `render_frames`(指定した秒やフレームの画像)か `render_contact_sheet`(区間をn枚並べた1枚)で見た目を確かめる
+3. 直したらもう一度 1 と 2
+
+| ツール | 内容 |
+| --- | --- |
+| `list_works` / `get_work` / `list_templates` | 作品の一覧、project.json と宣言、テンプレートの一覧 |
+| `create_work` / `add_sketch` | テンプレートから作品を作る、作品にスケッチとレイヤーを足す |
+| `render_frames` / `render_contact_sheet` | 描いた画像を返す(長辺1024pxのJPEG) |
+| `get_diagnostics` / `inspect_asset` | 診断、素材の中身(音声のBPM・ビート、MIDIのノートなど) |
+| `set_params` / `set_layers` / `set_event_map` / `get_tracks` / `set_clips` | project.json を変える(直接書かずにこれを使う) |
+| `export` | MP4(音声付き)か連番PNGで書き出す |
+| `list_history` / `restore_history` | 履歴(git)の一覧と巻き戻し(その作品だけ) |
+| `get_ui_context` | 人がアプリで指し示しているもの(作品、フレーム、選んだクリップ、プレビュー上で Alt+ドラッグで囲んだ範囲)と画像 |
+
+スケッチのファイル(sketch.ts、shader.fs)は直接編集してかまいません。保存すると5秒後に履歴へ自動でコミットされ、MCPのツールで変えた分はツール呼び出しごとにコミットされます。
+
+### MCPサーバーの登録
+
+アプリに同梱の `sb.exe` を、標準入出力のMCPサーバーとして登録します(アプリが起動していなければ、ウィンドウを出さずに起動します)。
+
+- Claude Code: `claude mcp add sketchbench -- <sb.exe のパス> mcp`
+- Codex: `codex mcp add sketchbench -- <sb.exe のパス> mcp`、または `~/.codex/config.toml` に
+
+```toml
+[mcp_servers.sketchbench]
+command = "<sb.exe のパス>"
+args = ["mcp"]
+```
+
+書き出しはコマンドでもできます: `sb render <作品> --format mp4 --from 0 --to 300`

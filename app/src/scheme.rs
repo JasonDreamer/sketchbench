@@ -146,6 +146,22 @@ pub fn handle(app: &tauri::AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>
             c.log(&l, v["level"].as_str().unwrap_or("info"), v["message"].as_str().unwrap_or(""), v["extra"].clone());
             resp(200, "text/plain", vec![])
         }
+        // 描画時間(プレビューが2秒ごとに送る)。get_diagnostics が返す
+        "/stats" => {
+            let v: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
+            *c.frame_stats.lock().unwrap() = v;
+            resp(200, "text/plain", vec![])
+        }
+        // プレビュー上で囲んだ範囲(0〜1の矩形。null で解除)。get_ui_context が返す
+        "/region" => {
+            let v: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
+            let mut ctx = c.ui_context.lock().unwrap();
+            if !ctx.is_object() {
+                *ctx = json!({});
+            }
+            ctx["region"] = v;
+            resp(200, "text/plain", vec![])
+        }
         "/key" => {
             let v: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
             let _ = tauri::Emitter::emit_to(&c.app, "ui", "sb:key", v);
@@ -278,6 +294,7 @@ fn export_route(c: &Arc<Core>, p: &str, req: &Request<Vec<u8>>) -> Response<Vec<
             }
         }
         "/export/write" => export::write(c, &id, query(req, "pos").and_then(|s| s.parse().ok()).unwrap_or(0), req.body()),
+        "/export/image" => export::image(c, &id, query(req, "i").and_then(|s| s.parse().ok()).unwrap_or(-1), req.body().to_vec()),
         "/export/frame" => export::frame(c, &id, query(req, "i").and_then(|s| s.parse().ok()).unwrap_or(0)),
         "/export/progress" => {
             export::progress(c, &id, query(req, "done").and_then(|s| s.parse().ok()).unwrap_or(0));

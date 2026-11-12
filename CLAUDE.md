@@ -5,7 +5,7 @@
 
 ## 進め方
 - `docs/design.md` の「開発フェーズ」の順に作る。各フェーズの完了条件を満たすまで次へ進まない。
-- フェーズ2(音とMIDI)まで完了(結果は design.md の開発フェーズ)。次はフェーズ3(AIが自分で確認できる)。フェーズ0の結果は `docs/phase0-results.md`、試作は `phase0/`(本体からは参照しない)。
+- フェーズ3(AIが自分で確認できる)まで完了(結果は design.md の開発フェーズ)。次はフェーズ4(制作ソフトとしての基盤)。フェーズ0の結果は `docs/phase0-results.md`、試作は `phase0/`(本体からは参照しない)。
 - アプリ本体は `app/`(Rustコア、`app/ui` がUI)、ランタイムは `packages/runtime`(`@sketchbench/runtime`)。ランタイムのTSはRustコアがOxcで変換して配信する。
 - 開発中の作業フォルダは環境変数 `SB_WORKSPACE` で指定する(既定は `%USERPROFILE%\Documents\Sketchbench`)。リポジトリ内で試すときは `.dev-workspace/`(gitに入れない)を使う。
 
@@ -18,3 +18,4 @@
 - 未確認のAPI名・フラグ・数値を推測で書かない。公式ドキュメントかソースで確かめ、確かめられなければ技術検証の項目にする。
 - CLI名は `sb`、ランタイムのパッケージ名は `@sketchbench/runtime`。
 - 動作確認で実際のマウスやキーを送らない(利用者の別のウィンドウに入力が漏れる)。開発ビルドを `SB_DEBUG_PORT=<番号>` で起動し、`node tools/ui-cdp.mjs <番号> "<式>"` でUIを操作し、`tools/screenshot-window.ps1` で取り込む。
+- MCPの動作確認は `node tools/mcp-call.mjs <sb.exe> <出力先> '<呼び出しのJSON配列>'` で行う(結果はパイプに通さずファイルへ書く。アプリが出力を握ったままになることがある)。

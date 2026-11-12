@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Timeline, type Selection, type TimelineApi } from "./Timeline";
@@ -26,6 +26,8 @@ export function App() {
   const [recording, setRecording] = createSignal(false);
   const [learn, setLearn] = createSignal<string | null>(null);
   let midiDialog!: HTMLDialogElement;
+  let historyDialog!: HTMLDialogElement;
+  const [history, setHistory] = createSignal<any[]>([]);
   const [still, setStill] = createSignal<string | null>(null);
   let covered = 0;
   /**
@@ -229,6 +231,40 @@ export function App() {
     return `${m}:${(s - m * 60).toFixed(2).padStart(5, "0")}`;
   };
 
+  createEffect(() => {
+    const s = selection();
+    const p = project();
+    const clip = s && p ? p.layers.find((l) => l.id === s.layer)?.tracks?.[s.track]?.[s.id] ?? null : null;
+    invoke("set_ui_context", { context: { work: work(), selection: s ? { ...s, clip } : null } }).catch(() => {});
+  });
+  createEffect(() => {
+    const t = time();
+    if (!t.playing) invoke("set_ui_context", { context: { work: work(), frame: Math.floor(t.frame), seconds: t.frame / t.fps, playing: false } }).catch(() => {});
+    else invoke("set_ui_context", { context: { playing: true } }).catch(() => {});
+  });
+
+  const openHistory = async () => {
+    try {
+      const r: any = await invoke("list_history");
+      setHistory(r.history);
+    } catch (e) {
+      fail(e);
+      setHistory([]);
+    }
+    if (!historyDialog.open) openDialog(historyDialog);
+  };
+
+  const restore = async (commit: string) => {
+    try {
+      await invoke("restore_history", { commit });
+      setStatus(`${commit} の状態に戻した(戻す前の状態も履歴に残っている)`);
+      historyDialog.close();
+      await refresh();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
   /** CCを割り当てられる数値のparams("レイヤー.名前") */
   const numericParams = createMemo(() => {
     const p = project();
@@ -326,6 +362,7 @@ export function App() {
             </label>
           )}
         </Show>
+        <button onClick={openHistory} disabled={!work()}>履歴</button>
         <button onClick={openMidi}>MIDI</button>
         <Show when={recording()}><span class="rec" title="MIDIを録音している(再生中の入力だけを記録)">● 録音中</span></Show>
         <button onClick={() => openDialog(bulkDialog)} disabled={clipTracks().length === 0} title="改行区切りのテキストをクリップにする">一括入力</button>
@@ -422,6 +459,30 @@ export function App() {
             </table>
           </Show>
           <div class="actions"><button onClick={() => { setLearn(null); midiDialog.close(); }}>閉じる</button></div>
+        </div>
+      </dialog>
+      <dialog ref={historyDialog}>
+        <div class="history">
+          <h3>履歴({work()})</h3>
+          <Show when={history().length > 0} fallback={<p class="hint">まだ履歴がありません。変更すると自動でコミットされます(MCPはツール呼び出しごと、直接の編集とUIの操作は5秒止まったら)。</p>}>
+            <ul>
+              <For each={history()}>
+                {(h) => (
+                  <li>
+                    <Show when={h.thumb} fallback={<div class="thumb empty" />}>
+                      <img class="thumb" src={`http://sb.localhost${h.thumb}`} alt="" loading="lazy" />
+                    </Show>
+                    <div class="meta">
+                      <div>{h.message.replace(/^[^:]+: /, "")}</div>
+                      <div class="hint">{h.commit} ・ {h.author} ・ {new Date(h.date).toLocaleString()}</div>
+                    </div>
+                    <button onClick={() => restore(h.commit)}>この状態に戻す</button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+          <div class="actions"><button onClick={() => historyDialog.close()}>閉じる</button></div>
         </div>
       </dialog>
       <dialog ref={bulkDialog}>

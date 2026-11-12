@@ -7,11 +7,15 @@ mod audio;
 mod clock;
 mod compile;
 mod core;
+mod diagnostics;
 mod edit;
 mod export;
+mod history;
+mod mcp;
 mod midi;
 mod midi_live;
 mod player;
+mod schema;
 mod scheme;
 mod workspace;
 mod wv2;
@@ -130,7 +134,41 @@ async fn start_export(app: AppHandle, options: export::ExportOptions) -> CmdResu
 fn edit_project(app: AppHandle, op: edit::Op) -> CmdResult {
     let c = core(&app);
     let dir = c.work_dir()?;
-    c.editor.apply(&dir, op)
+    schema::check_op_allowed(&dir)?;
+    let r = c.editor.apply(&dir, op)?;
+    // UIでの人の操作は5秒止まったら1コミット
+    if let Some(w) = c.work.lock().unwrap().clone() {
+        history::touch(&c, &w, "Sketchbench (UI)");
+    }
+    Ok(r)
+}
+
+/// 人がアプリで指し示しているもの(選択中のクリップなど)。MCPの get_ui_context が返す
+#[tauri::command]
+fn set_ui_context(app: AppHandle, context: Value) -> CmdResult {
+    let c = core(&app);
+    let mut cur = c.ui_context.lock().unwrap();
+    let mut v = if cur.is_object() { cur.clone() } else { json!({}) };
+    for (k, x) in context.as_object().into_iter().flatten() {
+        v[k] = x.clone();
+    }
+    *cur = v;
+    Ok(Value::Null)
+}
+
+/// 作品の履歴(サムネイル付き)
+#[tauri::command]
+fn list_history(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    let w = c.work.lock().unwrap().clone().ok_or("作品が開かれていない")?;
+    history::list(&c, &w, 100)
+}
+
+#[tauri::command]
+async fn restore_history(app: AppHandle, commit: String) -> CmdResult {
+    let c = core(&app);
+    let w = c.work.lock().unwrap().clone().ok_or("作品が開かれていない")?;
+    history::restore(&c, &w, &commit)
 }
 
 #[tauri::command]
@@ -196,7 +234,18 @@ fn reveal(path: String) -> CmdResult {
 }
 
 fn main() {
+    let background = std::env::args().any(|a| a == "--background");
     tauri::Builder::default()
+        // 単一インスタンス: 2つ目の起動はウィンドウを前に出すだけ(sb mcp と sb render は既存のアプリに依頼する)
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|a| a == "--background") {
+                if let Some(w) = app.get_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+        }))
         .register_asynchronous_uri_scheme_protocol("sb", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
             std::thread::spawn(move || {
@@ -226,15 +275,19 @@ fn main() {
             midi_connect,
             midi_record,
             preview_still,
+            set_ui_context,
+            list_history,
+            restore_history,
             reveal
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let c = Arc::new(Core::new(app.handle().clone()));
             if let Err(e) = workspace::ensure_workspace(&c.ws) {
                 eprintln!("作業フォルダを用意できない: {e}");
             }
             app.manage(c.clone());
-            let win = tauri::window::WindowBuilder::new(app, "main").title("Sketchbench").inner_size(1600.0, 960.0).build()?;
+            // --background は sb mcp が未起動のアプリを立ち上げるとき。ウィンドウを出さずに動く
+            let win = tauri::window::WindowBuilder::new(app, "main").title("Sketchbench").inner_size(1600.0, 960.0).visible(!background).build()?;
             let size = win.inner_size()?.to_logical::<f64>(win.scale_factor()?);
             win.add_child(
                 ui_builder(&c),
@@ -243,6 +296,12 @@ fn main() {
             )?;
             c.start_watchdog();
             c.start_clock_broadcast();
+            if let Err(e) = history::ensure_repo(&c.ws) {
+                c.log("history", "warn", format!("作業フォルダをgitリポジトリにできない: {e}"), Value::Null);
+            }
+            history::start_idle_committer(c.clone());
+            c.watch_works_for_history();
+            tauri::async_runtime::spawn(mcp::serve(c.clone()));
             // 確認用: --render <作品> [--format mp4|png] で書き出して終了する
             let args: Vec<String> = std::env::args().collect();
             // 確認用: --verify <作品> <作品内のMP4> で音と映像の同期を調べて終了する
@@ -278,7 +337,7 @@ fn main() {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                     let order = args.iter().position(|a| a == "--order").and_then(|j| args.get(j + 1).cloned());
-                    let opt = export::ExportOptions { work, format, from: None, to: None, order };
+                    let opt = export::ExportOptions { work, format, from: None, to: None, order, frames: None, count: None, max_size: None };
                     if let Err(e) = export::start(&c2, opt) {
                         c2.log("export", "error", e, Value::Null);
                         c2.app.exit(1);
