@@ -222,7 +222,8 @@ Sketchbench のMCPサーバー(`sketchbench`)につながっていれば、人�
 | `render_frames` / `render_contact_sheet` | 描いた画像を返す(長辺1024pxのJPEG) |
 | `get_diagnostics` / `inspect_asset` | 診断、素材の中身(音声のBPM・ビート、MIDIのノートなど) |
 | `set_params` / `set_keyframes` / `update_layer` / `set_layers` / `set_event_map` / `get_tracks` / `set_clips` | project.json を変える(直接書かずにこれを使う)。`set_keyframes` は params・クリップのフィールド・合成の値(`property`)のキーを丸ごと置き換え、`update_layer` はレイヤー1つの設定を部分的に変える |
-| `export` | MP4(音声付き)か連番PNGで書き出す |
+| `export` | MP4(音声付き)か連番PNGで書き出し、終わるまで待つ。大きさ(`width`・`height`)、連番PNGの `depth`(8・16)と `alpha`(straight・premultiplied・none)、`motionBlur`(`{ samples, shutter }`、pure のスケッチだけ)、MP4の `loudness`(`{ lufs: -14 }` など。トゥルーピークは -1 dBTP に抑える)、ファイル名に付ける `name` を指定できる |
+| `queue_add` / `queue_list` / `queue_cancel` | レンダーキュー。`export` と同じ仕様を配列で積み、登録順に1つずつ書き出す(16:9 と 9:16 などをまとめて)。積んだらすぐ返るので、`queue_list` で状態を見る |
 | `list_history` / `restore_history` | 履歴(git)の一覧と巻き戻し(その作品だけ) |
 | `get_ui_context` | 人がアプリで指し示しているもの(作品、フレーム、選んだクリップ、プレビュー上で Alt+ドラッグで囲んだ範囲)と画像 |
 

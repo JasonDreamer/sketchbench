@@ -129,7 +129,7 @@ pub fn handle(app: &tauri::AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>
         "/vendor/p5.js" => file(&repo.join("node_modules/p5/lib/p5.esm.min.js")),
         "/vendor/mediabunny.js" => file(&repo.join("node_modules/mediabunny/dist/bundles/mediabunny.min.mjs")),
         "/api/project" => api_project(&c, &query(&req, "work").unwrap_or_default()),
-        p if p.starts_with("/work/") => work_file(&c, p),
+        p if p.starts_with("/work/") => work_file(&c, p, &req),
         "/hb" | "/state" | "/hello" => {
             let l = query(&req, "l").unwrap_or_default();
             let mut s = c.sketches.lock().unwrap();
@@ -219,7 +219,7 @@ fn api_project(c: &Arc<Core>, work: &str) -> Response<Vec<u8>> {
 /// /work/<作品>/build/<スケッチ> : sketch.ts を変換したJS(失敗時は診断のJSONで422)
 /// /work/<作品>/isf/<スケッチ>   : shader.fs の本文とISFのメタデータ
 /// /work/<作品>/files/<相対パス> : 作品フォルダ内のファイル(assetsなど)
-fn work_file(c: &Arc<Core>, p: &str) -> Response<Vec<u8>> {
+fn work_file(c: &Arc<Core>, p: &str, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     let rest = &p["/work/".len()..];
     let Some((work, rest)) = rest.split_once('/') else { return err(404, "") };
     let Some(dir) = workspace::work_dir(&c.ws, work) else { return err(404, "作品がない") };
@@ -269,7 +269,12 @@ fn work_file(c: &Arc<Core>, p: &str) -> Response<Vec<u8>> {
                 Ok(p) => p,
                 Err(e) => return err(422, e),
             };
-            match crate::audio::mixdown(&dir, &p, sr, from, to) {
+            let job = query(req, "job");
+            let mixed = crate::audio::mixdown(&dir, &p, sr, from, to).and_then(|v| match &job {
+                Some(id) => export::mix_for_job(c, id, v, sr),
+                None => Ok(v),
+            });
+            match mixed {
                 Ok(v) => resp(200, "application/octet-stream", v.iter().flat_map(|x| x.to_le_bytes()).collect()),
                 Err(e) => err(422, e),
             }

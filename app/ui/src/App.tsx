@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Timeline, type Selection, type TimelineApi } from "./Timeline";
 import type { ProjectLike } from "./timeline-model";
 import { ParamPanel, type ParamApi } from "./ParamPanel";
+import { ExportForm, QueueList, type QueueItem } from "./ExportUi";
 
 type TimeMsg = { frame: number; playing: boolean; fps: number; duration: number; unixMs: number; audio?: boolean };
 type Log = { source: string; level: string; message: string; unixMs: number };
@@ -65,6 +66,12 @@ export function App() {
   let newDialog!: HTMLDialogElement;
   let bulkDialog!: HTMLDialogElement;
   let layerDialog!: HTMLDialogElement;
+  let exportDialog!: HTMLDialogElement;
+  let queueDialog!: HTMLDialogElement;
+  const [exportOpen, setExportOpen] = createSignal(false);
+  const [queue, setQueue] = createSignal<QueueItem[]>([]);
+  /** 書き出し中のジョブの進み具合(ジョブid → 描いたフレーム数) */
+  const [progress, setProgress] = createSignal<Record<string, number>>({});
 
   const refresh = async () => {
     const s: any = await invoke("get_state");
@@ -120,7 +127,11 @@ export function App() {
         // スケッチを読み込み直すと宣言(tracks)が変わることがある
         if (/を読み込んだ/.test(e.payload.message)) refresh();
       }),
-      listen<ExportMsg>("sb:export", (e) => setExp(e.payload)),
+      listen<ExportMsg>("sb:export", (e) => {
+        setExp(e.payload);
+        if (e.payload.id && e.payload.done != null) setProgress((m) => ({ ...m, [e.payload.id]: e.payload.done! }));
+      }),
+      listen<{ items: QueueItem[] }>("sb:queue", (e) => setQueue(e.payload.items)),
       listen("sb:reload", () => refresh()),
       // CC割り当ての学習: 選んだparamに、次に動かしたコントローラーを割り当てる
       listen<{ type: string; channel: number; controller: number }>("sb:midi", (e) => {
@@ -136,6 +147,7 @@ export function App() {
       }),
     ]);
     onCleanup(() => un.forEach((f) => f()));
+    invoke<{ items: QueueItem[] }>("queue_list").then((q) => setQueue(q.items), () => {});
     const first: any = await invoke("get_state");
     await refresh();
     // 起動時は --open で指定した作品か、一覧の先頭を開く(前回のワークスペースの復元はフェーズ4)
@@ -218,16 +230,12 @@ export function App() {
     }
   };
 
-  const startExport = async (format: "mp4" | "png") => {
-    const w = work();
-    if (!w) return;
-    try {
-      await invoke("start_export", { options: { work: w, format } });
-      setExp({ id: "", state: "running", done: 0, total: time().duration });
-    } catch (e) {
-      fail(e);
-    }
+  const openExport = () => {
+    setExportOpen(true);
+    openDialog(exportDialog);
+    exportDialog.addEventListener("close", () => setExportOpen(false), { once: true });
   };
+  const pending = () => queue().filter((q) => q.state === "waiting" || q.state === "running").length;
 
   const fmtTime = (f: number) => {
     const s = f / time().fps;
@@ -373,8 +381,8 @@ export function App() {
         <button onClick={() => openDialog(bulkDialog)} disabled={clipTracks().length === 0} title="改行区切りのテキストをクリップにする">一括入力</button>
         <span class="spacer" />
         <ExportState exp={exp()} />
-        <button onClick={() => startExport("mp4")} disabled={!work() || exp()?.state === "running"}>MP4を書き出す</button>
-        <button onClick={() => startExport("png")} disabled={!work() || exp()?.state === "running"}>連番PNGを書き出す</button>
+        <button onClick={openExport} disabled={!work()}>書き出し</button>
+        <button onClick={() => openDialog(queueDialog)} title="書き出しの順番待ちと結果">キュー{pending() ? `(${pending()})` : ""}</button>
       </div>
       <div class="preview" ref={previewEl}>
         <Show when={still()}>{(u) => <img class="still" src={u()} alt="" />}</Show>
@@ -494,6 +502,15 @@ export function App() {
           </Show>
           <div class="actions"><button onClick={() => historyDialog.close()}>閉じる</button></div>
         </div>
+      </dialog>
+      <dialog ref={exportDialog}>
+        <Show when={exportOpen() && work() && project()}>
+          <ExportForm work={work()!} project={project()!} close={() => exportDialog.close()} fail={fail}
+            added={(n) => setStatus(`キューに${n}件積んだ。「キュー」で進み具合を見られます`)} />
+        </Show>
+      </dialog>
+      <dialog ref={queueDialog}>
+        <QueueList items={queue()} progress={progress()} close={() => queueDialog.close()} fail={fail} />
       </dialog>
       <dialog ref={layerDialog}>
         <form onSubmit={(ev) => { ev.preventDefault(); const fd = new FormData(ev.currentTarget); layerDialog.close(); edit({ op: "addLayer", sketch: String(fd.get("sketch")) }); }}>

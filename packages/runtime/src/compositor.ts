@@ -55,21 +55,40 @@ void main() {
   o = vec4(s.rgb * (1.0 - d.a) + d.rgb * (1.0 - s.a) + s.a * d.a * B, s.a + d.a * (1.0 - s.a));
 }`;
 
-// 溜めた結果を画面へ(上下を返す)。uRead=1 のときはアルファで割って8bitの読み出し用にする
+// 溜めた結果を出す。uFlip=1 は画面(上下を返す)。uAlpha: 0 プリマルチプライド、1 ストレート、2 黒の上に重ねて不透明。
+// uDither=1 のときは8bitに丸める前に4x4の組織的ディザをかける(バンディングを防ぐ。位置だけで決まるので結果は毎回同じ)
 const FS_OUT = `#version 300 es
 precision highp float;
 uniform sampler2D uAcc;
-uniform int uRead;
+uniform int uFlip;
+uniform int uAlpha;
+uniform int uDither;
 uniform vec2 uSize;
 out vec4 o;
+const float BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
 void main() {
   ivec2 P = ivec2(gl_FragCoord.xy);
-  if (uRead == 0) P.y = int(uSize.y) - 1 - P.y;
-  vec4 c = texelFetch(uAcc, P, 0);
-  c = clamp(c, 0.0, 1.0);
-  if (uRead == 1) o = c.a > 0.0 ? vec4(c.rgb / c.a, c.a) : vec4(0.0);
-  else o = c;
+  if (uFlip == 1) P.y = int(uSize.y) - 1 - P.y;
+  vec4 c = clamp(texelFetch(uAcc, P, 0), 0.0, 1.0);
+  if (uAlpha == 1) c = c.a > 0.0 ? vec4(c.rgb / c.a, c.a) : vec4(0.0);
+  else if (uAlpha == 2) c.a = 1.0;
+  if (uDither == 1) {
+    float d = (BAYER[(P.y & 3) * 4 + (P.x & 3)] + 0.5) / 16.0 - 0.5;
+    c.rgb = clamp(c.rgb + d / 255.0, 0.0, 1.0);
+  }
+  o = c;
 }`;
+
+// 足し合わせ(モーションブラー)と写し: o = uTex × uW
+const FS_COPY = `#version 300 es
+precision highp float;
+uniform sampler2D uTex;
+uniform float uW;
+out vec4 o;
+void main() { o = texelFetch(uTex, ivec2(gl_FragCoord.xy), 0) * uW; }`;
+
+export type AlphaMode = "straight" | "premultiplied" | "none";
+const ALPHA_ID: Record<AlphaMode, number> = { premultiplied: 0, straight: 1, none: 2 };
 
 function compile(gl: WebGL2RenderingContext, fs: string): WebGLProgram {
   const prog = gl.createProgram()!;
@@ -93,6 +112,11 @@ export class Compositor {
   readonly float: boolean;
   private layerProg: WebGLProgram;
   private outProg: WebGLProgram;
+  private copyProg: WebGLProgram;
+  /** モーションブラーの足し合わせ先 */
+  private sum: Target;
+  /** 16bitの読み出し用(RGBA32F。必要になったら作る) */
+  private readF: Target | null = null;
   private acc: [Target, Target];
   private matte: Target;
   private read: Target;
@@ -109,10 +133,13 @@ export class Compositor {
     this.float = !!gl.getExtension("EXT_color_buffer_float");
     this.layerProg = compile(gl, FS_LAYER);
     this.outProg = compile(gl, FS_OUT);
+    this.copyProg = compile(gl, FS_COPY);
     for (const n of ["uDst", "uSrc", "uMatteTex", "uInv", "uOpacity", "uBlend", "uMatte", "uMode"]) this.u[n] = gl.getUniformLocation(this.layerProg, n);
-    for (const n of ["uAcc", "uRead", "uSize"]) this.u[`out.${n}`] = gl.getUniformLocation(this.outProg, n);
+    for (const n of ["uAcc", "uFlip", "uAlpha", "uDither", "uSize"]) this.u[`out.${n}`] = gl.getUniformLocation(this.outProg, n);
+    for (const n of ["uTex", "uW"]) this.u[`copy.${n}`] = gl.getUniformLocation(this.copyProg, n);
     this.acc = [this.target(this.float), this.target(this.float)];
     this.matte = this.target(this.float);
+    this.sum = this.target(this.float);
     this.read = this.target(false);
     this.src = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, this.src);
@@ -129,11 +156,11 @@ export class Compositor {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
-  private target(float: boolean): Target {
+  private target(float: boolean, format?: number): Target {
     const gl = this.gl;
     const tex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, float ? gl.RGBA16F : gl.RGBA8, this.width, this.height);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, format ?? (float ? gl.RGBA16F : gl.RGBA8), this.width, this.height);
     this.params(gl.NEAREST);
     const fb = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
@@ -205,35 +232,86 @@ export class Compositor {
     this.cur = 1 - this.cur;
   }
 
-  /** 画面(canvas)へ出す */
-  finish() {
+  private out(fb: WebGLFramebuffer | null, flip: boolean, alpha: number, dither: boolean) {
     const gl = this.gl;
     gl.useProgram(this.outProg);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.acc[this.cur].tex);
     gl.uniform1i(this.u["out.uAcc"], 0);
-    gl.uniform1i(this.u["out.uRead"], 0);
+    gl.uniform1i(this.u["out.uFlip"], flip ? 1 : 0);
+    gl.uniform1i(this.u["out.uAlpha"], alpha);
+    gl.uniform1i(this.u["out.uDither"], dither ? 1 : 0);
     gl.uniform2f(this.u["out.uSize"], this.width, this.height);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.viewport(0, 0, this.width, this.height);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  /** 合成結果をRGBA8(アルファで割った値、上の行から)で読む */
-  readPixels(into?: Uint8Array): Uint8Array {
+  /** 画面(canvas)へ出す。canvasは8bitなのでディザをかける */
+  finish() {
+    this.out(null, true, 0, this.float);
+  }
+
+  /**
+   * 合成結果を上の行から読む。depth 8 は RGBA8(into は幅×高さ×4バイト)、
+   * 16 は RGBA16(リトルエンディアン、into は幅×高さ×8バイト)
+   */
+  readPixels(into?: Uint8Array, opts: { depth?: 8 | 16; alpha?: AlphaMode } = {}): Uint8Array {
     const gl = this.gl;
-    const out = into ?? new Uint8Array(this.width * this.height * 4);
-    gl.useProgram(this.outProg);
+    const depth = opts.depth ?? 8;
+    const alpha = ALPHA_ID[opts.alpha ?? "straight"];
+    const n = this.width * this.height * 4;
+    if (depth === 8) {
+      const out = into ?? new Uint8Array(n);
+      this.out(this.read.fb, false, alpha, this.float);
+      gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return out;
+    }
+    if (!this.float) throw new Error("16bitの書き出しには EXT_color_buffer_float が要る(このGPUでは使えない)");
+    this.readF ??= this.target(true, gl.RGBA32F);
+    this.out(this.readF.fb, false, alpha, false);
+    const f = new Float32Array(n);
+    gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.FLOAT, f);
+    const out = into ?? new Uint8Array(n * 2);
+    const u16 = new Uint16Array(out.buffer, out.byteOffset, n);
+    for (let i = 0; i < n; i++) u16[i] = Math.round(Math.min(1, Math.max(0, f[i])) * 65535);
+    return out;
+  }
+
+  /** モーションブラー: 足し合わせを空にする */
+  blurBegin() {
+    this.clear(this.sum);
+  }
+
+  /** モーションブラー: 今の合成結果を重み w で足す */
+  blurAdd(w: number) {
+    const gl = this.gl;
+    gl.useProgram(this.copyProg);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.acc[this.cur].tex);
-    gl.uniform1i(this.u["out.uAcc"], 0);
-    gl.uniform1i(this.u["out.uRead"], 1);
-    gl.uniform2f(this.u["out.uSize"], this.width, this.height);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.read.fb);
+    gl.uniform1i(this.u["copy.uTex"], 0);
+    gl.uniform1f(this.u["copy.uW"], w);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.sum.fb);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disable(gl.BLEND);
+  }
+
+  /** モーションブラー: 足し合わせを合成結果にする */
+  blurEnd() {
+    const gl = this.gl;
+    const to = this.acc[1 - this.cur];
+    gl.useProgram(this.copyProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.sum.tex);
+    gl.uniform1i(this.u["copy.uTex"], 0);
+    gl.uniform1f(this.u["copy.uW"], 1);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, to.fb);
     gl.viewport(0, 0, this.width, this.height);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
-    return out;
+    this.cur = 1 - this.cur;
   }
 
   dispose() {

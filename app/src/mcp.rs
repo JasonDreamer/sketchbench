@@ -259,14 +259,67 @@ pub struct SetClipsArg {
     pub replace: bool,
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub struct ExportArg {
-    pub work: String,
+/// 書き出しの仕様
+#[derive(Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSpec {
     /// "mp4" か "png"(連番)
     pub format: String,
     /// 範囲(フレーム)。省略すると全体
     pub from: Option<u64>,
     pub to: Option<u64>,
+    /// 出力の大きさ。省略すると作品の width・height。16:9 と 9:16 のように作品と違う比率も指定できる(スケッチは width・height を見て描く)
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// 連番PNGの色深度 8(既定)か 16
+    pub depth: Option<u8>,
+    /// 連番PNGのアルファ "straight"(既定)・"premultiplied"・"none"
+    pub alpha: Option<String>,
+    /// モーションブラー { samples: 1フレームに描く回数(2〜64), shutter: 開いている割合(0.5で180度) }。pure のスケッチだけに効く
+    pub motion_blur: Option<export::MotionBlur>,
+    /// 音声を { lufs: 目標(例 -14), truePeak: 上限 dBTP(既定 -1) } に合わせる(MP4のみ)
+    pub loudness: Option<export::LoudnessTarget>,
+    /// ファイル名の末尾に付ける名前(英数字・-・_)
+    pub name: Option<String>,
+}
+
+impl ExportSpec {
+    fn options(self, work: String) -> ExportOptions {
+        ExportOptions {
+            work,
+            format: self.format,
+            from: self.from,
+            to: self.to,
+            width: self.width,
+            height: self.height,
+            depth: self.depth,
+            alpha: self.alpha,
+            motion_blur: self.motion_blur,
+            loudness: self.loudness,
+            name: self.name,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ExportArg {
+    pub work: String,
+    #[serde(flatten)]
+    pub spec: ExportSpec,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct QueueAddArg {
+    pub work: String,
+    /// 書き出しの仕様の配列。1つずつ順に書き出す(16:9 と 9:16 などをまとめて積める)
+    pub jobs: Vec<ExportSpec>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct QueueIdArg {
+    /// queue_add が返した id
+    pub id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -399,7 +452,7 @@ impl Tools {
         if frames.is_empty() {
             frames = vec![0, p.duration / 2, p.duration.saturating_sub(1)];
         }
-        let o = export::run(&self.core, ExportOptions { work: a.work.clone(), format: "frames".into(), from: None, to: None, order: None, frames: Some(frames), count: None, max_size: a.max_size }).await;
+        let o = export::run(&self.core, ExportOptions { work: a.work.clone(), format: "frames".into(), from: None, to: None, order: None, frames: Some(frames), count: None, max_size: a.max_size, ..Default::default() }).await;
         if !o.ok {
             return fail(format!("描けない: {}。get_diagnostics でエラーを確認", o.error.unwrap_or_default()));
         }
@@ -421,7 +474,7 @@ impl Tools {
         let fps = p.fps_f64();
         let from = a.from.map(|t| (t * fps).floor() as u64).unwrap_or(0);
         let to = a.to.map(|t| (t * fps).ceil() as u64).unwrap_or(p.duration).min(p.duration);
-        let o = export::run(&self.core, ExportOptions { work: a.work.clone(), format: "sheet".into(), from: Some(from), to: Some(to), order: None, frames: None, count: a.n, max_size: a.max_size }).await;
+        let o = export::run(&self.core, ExportOptions { work: a.work.clone(), format: "sheet".into(), from: Some(from), to: Some(to), order: None, frames: None, count: a.n, max_size: a.max_size, ..Default::default() }).await;
         if !o.ok {
             return fail(format!("描けない: {}。get_diagnostics でエラーを確認", o.error.unwrap_or_default()));
         }
@@ -523,15 +576,37 @@ impl Tools {
 
     #[tool(description = "書き出してファイルの場所を返す(mp4 は音声付き、png は連番)。書き出し前にgitへコミットする")]
     async fn export(&self, Parameters(a): Parameters<ExportArg>) -> Result<CallToolResult, ErrorData> {
-        if a.format != "mp4" && a.format != "png" {
+        if a.spec.format != "mp4" && a.spec.format != "png" {
             return fail("format は mp4 か png");
         }
         crate::history::commit_work(&self.core, &a.work, "書き出し前の状態", "Sketchbench");
-        let o = export::run(&self.core, ExportOptions { work: a.work, format: a.format, from: a.from, to: a.to, order: None, frames: None, count: None, max_size: None }).await;
+        let o = export::run(&self.core, a.spec.options(a.work)).await;
         if o.ok {
-            ok_json(json!({ "path": o.path, "seconds": o.elapsed }))
+            ok_json(json!({ "path": o.path, "seconds": o.elapsed, "loudness": o.loudness }))
         } else {
             fail(o.error.unwrap_or_default())
+        }
+    }
+
+    #[tool(description = "レンダーキューに書き出しを積む(すぐ返る)。進み具合と結果は queue_list で見る")]
+    async fn queue_add(&self, Parameters(a): Parameters<QueueAddArg>) -> Result<CallToolResult, ErrorData> {
+        let items = a.jobs.into_iter().map(|s| s.options(a.work.clone())).collect();
+        match crate::queue::add(&self.core, items) {
+            Ok(ids) => ok_json(json!({ "ids": ids })),
+            Err(e) => fail(e),
+        }
+    }
+
+    #[tool(description = "レンダーキューの一覧(状態、進んだフレーム数、ファイルの場所、音量の正規化の結果)", annotations(read_only_hint = true))]
+    async fn queue_list(&self) -> Result<CallToolResult, ErrorData> {
+        ok_json(crate::queue::list(&self.core))
+    }
+
+    #[tool(description = "レンダーキューの項目を取り消す(書き出し中なら止める)")]
+    async fn queue_cancel(&self, Parameters(a): Parameters<QueueIdArg>) -> Result<CallToolResult, ErrorData> {
+        match crate::queue::cancel(&self.core, &a.id) {
+            Ok(()) => ok_json(json!({ "ok": true })),
+            Err(e) => fail(e),
         }
     }
 
@@ -557,7 +632,7 @@ impl Tools {
         let mut content = vec![ContentBlock::text(serde_json::to_string_pretty(&ctx).unwrap_or_default())];
         if let Some(work) = ctx["work"].as_str() {
             let frame = ctx["frame"].as_u64().unwrap_or(0);
-            let o = export::run(&self.core, ExportOptions { work: work.into(), format: "frames".into(), from: None, to: None, order: None, frames: Some(vec![frame]), count: None, max_size: Some(1024) }).await;
+            let o = export::run(&self.core, ExportOptions { work: work.into(), format: "frames".into(), from: None, to: None, order: None, frames: Some(vec![frame]), count: None, max_size: Some(1024), ..Default::default() }).await;
             content.extend(images(&o, |f| format!("frame {f}")));
         }
         Ok(CallToolResult::success(content))

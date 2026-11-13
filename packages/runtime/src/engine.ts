@@ -8,7 +8,7 @@ import { createIsf, createRenderer, type Renderer } from "./renderers.js";
 import { loadAudio } from "./audio.js";
 import { makeTracks } from "./tracks.js";
 import { evaluate } from "./keyframes.js";
-import { Compositor } from "./compositor.js";
+import { Compositor, type AlphaMode } from "./compositor.js";
 import { bindTime, LayerClock, placement, TIME_ARGS, type LayerSettings } from "./layer.js";
 import { beatsFn, clearMidiCache, Events, fetchMidi, loadMidi, makeMarkers, MidiTrack, sectionFn, type MarkerInfo } from "./midi.js";
 
@@ -61,6 +61,8 @@ export class Engine {
   project!: ProjectInfo;
   output: HTMLCanvasElement;
   comp: Compositor | null = null;
+  /** 書き出しで出力の大きさを変えるとき(16:9 と 9:16 など)。project.json の width・height の代わりに使う */
+  sizeOverride: { width: number; height: number } | null = null;
   layers = new Map<string, Loaded>();
   order: string[] = [];
   host: HTMLElement;
@@ -93,6 +95,10 @@ export class Engine {
       return false;
     }
     const p = res.project as ProjectInfo;
+    if (this.sizeOverride) {
+      p.width = this.sizeOverride.width;
+      p.height = this.sizeOverride.height;
+    }
     const sizeChanged = !this.project || p.width !== this.project.width || p.height !== this.project.height;
     this.project = p;
     if (sizeChanged) {
@@ -162,9 +168,9 @@ export class Engine {
     return out;
   }
 
-  /** 合成結果をRGBA8(アルファで割った値、上の行から)で読む */
-  readPixels(into?: Uint8Array) {
-    return this.comp!.readPixels(into);
+  /** 合成結果を上の行から読む(compositor.ts の readPixels) */
+  readPixels(into?: Uint8Array, opts?: { depth?: 8 | 16; alpha?: AlphaMode }) {
+    return this.comp!.readPixels(into, opts);
   }
 
   private drop(id: string) {
@@ -255,16 +261,45 @@ export class Engine {
    * 1フレーム描いて合成する。先に全レイヤーのスケッチを下から順に描き(inputs.layer は自分より下のレイヤーだけ引ける)、
    * そのあとで変形・不透明度・ブレンド・マットをかけて重ねる
    */
-  async render(frame: number) {
-    const tw = frame / this.fps;
+  async render(frame: number, blur?: { samples: number; shutter: number }) {
+    const comp = this.comp!;
+    if (blur && blur.samples > 1 && this.allPure()) {
+      // AEと同じくフレームを中心に、シャッターが開いている間を等間隔に描いて平均する
+      comp.blurBegin();
+      for (let i = 0; i < blur.samples; i++) {
+        await this.compose(frame, frame + blur.shutter * ((i + 0.5) / blur.samples - 0.5));
+        comp.blurAdd(1 / blur.samples);
+      }
+      comp.blurEnd();
+    } else {
+      await this.compose(frame, frame);
+    }
+    comp.finish();
+    this.lastFrame = frame;
+  }
+
+  /** モーションブラーは時刻だけで決まるスケッチでしかかけられない */
+  private allPure(): boolean {
+    const bad = this.order.filter((id) => (this.layers.get(id)?.def.mode ?? "sequential") !== "pure");
+    if (bad.length && !this.warned.has("blur")) {
+      this.warned.add("blur");
+      log("warn", `モーションブラーをかけない: ${bad.join("、")} が pure ではない(状態を持つスケッチは1フレームの中の時刻を描き分けられない)`);
+    }
+    return bad.length === 0;
+  }
+
+  /** frame(整数)で出ているレイヤーを、時刻 sub(モーションブラーでは小数)で描いて重ねる。画面へはまだ出さない */
+  private async compose(frame: number, sub: number) {
+    const tw = sub / this.fps;
     advanceTo(tw * 1000);
     const { width, height } = this.project;
     const drawn = new Map<string, HTMLCanvasElement>();
     for (const id of this.order) {
       const l = this.layers.get(id);
       if (!l || !l.clock.active(frame)) continue;
-      const lf = l.clock.layerFrame(frame);
-      const lframe = Math.floor(lf + 1e-9);
+      const lf = l.clock.layerFrame(sub);
+      // 乱数のシードとスケッチの frame はフレームの整数で(モーションブラーの中で粒がちらつかないように)
+      const lframe = Math.floor(l.clock.layerFrame(frame) + 1e-9);
       const t = lf / this.fps;
       seed(this.project.seed ?? 0, lframe);
       const p = this.paramsAt(id, evalParams(l.params, l.types, lf), tw);
@@ -298,7 +333,7 @@ export class Engine {
     const matteSources = new Set(this.order.map((id) => this.layers.get(id)?.settings.matte?.layer).filter(Boolean) as string[]);
     const place = (id: string) => {
       const l = this.layers.get(id)!;
-      return { source: drawn.get(id)!, ...placement(l.settings, l.clock.layerFrame(frame), width, height) };
+      return { source: drawn.get(id)!, ...placement(l.settings, l.clock.layerFrame(sub), width, height) };
     };
     for (const id of this.order) {
       const l = this.layers.get(id);
@@ -307,8 +342,6 @@ export class Engine {
       const matte = m ? { placed: drawn.has(m.layer) && this.layers.has(m.layer) ? place(m.layer) : null, mode: m.mode ?? "alpha" } : undefined;
       comp.layer(place(id), l.settings.blend ?? "normal", matte);
     }
-    comp.finish();
-    this.lastFrame = frame;
   }
 
   private warned = new Set<string>();

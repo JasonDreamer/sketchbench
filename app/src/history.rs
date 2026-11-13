@@ -86,7 +86,7 @@ fn thumbnail(core: &Arc<Core>, work: &str, commit: &str) {
         let Ok(p) = crate::workspace::read_project(&dir) else { return };
         let o = crate::export::run(
             &core,
-            crate::export::ExportOptions { work: work.clone(), format: "frames".into(), from: None, to: None, order: None, frames: Some(vec![p.duration / 2]), count: None, max_size: Some(320) },
+            crate::export::ExportOptions { work: work.clone(), format: "frames".into(), from: None, to: None, order: None, frames: Some(vec![p.duration / 2]), count: None, max_size: Some(320), ..Default::default() },
         )
         .await;
         if let Some((_, jpeg)) = o.images.first() {

@@ -47,6 +47,9 @@ pub struct Core {
     pub rev: AtomicU64,
     pub logs: Mutex<Vec<Value>>,
     pub jobs: Mutex<HashMap<String, export::Job>>,
+    /// レンダーキュー(queue.rs)
+    pub queue: Mutex<Vec<crate::queue::Item>>,
+    pub queue_running: AtomicBool,
     pub player: Arc<crate::player::Player>,
     pub editor: crate::edit::Editor,
     pub live: crate::midi_live::LiveMidi,
@@ -88,6 +91,8 @@ impl Core {
             rev: AtomicU64::new(1),
             logs: Default::default(),
             jobs: Default::default(),
+            queue: Default::default(),
+            queue_running: AtomicBool::new(false),
             player: crate::player::Player::start(),
             editor: Default::default(),
             live: Default::default(),

@@ -4,6 +4,7 @@ import { real, withRealTimers, onError } from "./clock.js";
 import { install as installRandom } from "./rand.js";
 import { errorText, label, listen, log, mode, post, query, setPhase, work } from "./bridge.js";
 import { Engine } from "./engine.js";
+import type { AlphaMode } from "./compositor.js";
 
 installRandom();
 onError((e) => log("error", `タイマー/rAFのコールバックで例外: ${errorText(e)}`));
@@ -103,6 +104,12 @@ async function exportJob() {
   const fail = (e: unknown) => post(`/export/fail?job=${job}`, errorText(e));
   try {
     setPhase("setup");
+    const ow = Number(query.get("w") ?? 0), oh = Number(query.get("h") ?? 0);
+    if (ow > 0 && oh > 0) engine.sizeOverride = { width: ow, height: oh };
+    const depth = (Number(query.get("depth") ?? 8) === 16 ? 16 : 8) as 8 | 16;
+    const alpha = (query.get("alpha") ?? "straight") as AlphaMode;
+    const mbs = Number(query.get("mbs") ?? 1);
+    const blur = mbs > 1 ? { samples: mbs, shutter: Number(query.get("mbsh") ?? 0.5) } : undefined;
     if (!(await engine.load())) throw new Error("スケッチを読み込めない(ログを参照)");
     setPhase("ready");
     const { width, height, fps } = engine.project;
@@ -195,7 +202,8 @@ async function exportJob() {
         source = new mb.CanvasSource(engine.output, { codec, bitrate, keyFrameInterval: 2 });
         output.addVideoTrack(source, { frameRate: fps[0] / fps[1] });
         if ((engine.project.audio ?? []).length > 0) {
-          const r = await fetch(`/work/${encodeURIComponent(work)}/mixdown/${from}-${to}@${SR}`);
+          // 音量の正規化(指定があれば)はRustコアがジョブの設定でかける
+          const r = await fetch(`/work/${encodeURIComponent(work)}/mixdown/${from}-${to}@${SR}?job=${job}`);
           if (!r.ok) throw new Error(`音声をミックスできない: ${await r.text()}`);
           audioPcm = new Float32Array(await r.arrayBuffer());
           const acodec = (await mb.canEncodeAudio("aac", { numberOfChannels: 2, sampleRate: SR, bitrate: 192000 })) ? "aac" : "opus";
@@ -226,7 +234,7 @@ async function exportJob() {
     let tRender = 0, tOut = 0;
     for (const f of frames) {
       const t0 = real.performanceNow();
-      await engine.render(f);
+      await engine.render(f, blur);
       const t1 = real.performanceNow();
       tRender += t1 - t0;
       if (format === "mp4") {
@@ -243,7 +251,7 @@ async function exportJob() {
           }
         }
       } else {
-        engine.readPixels(sharedView!);
+        engine.readPixels(sharedView!, { depth, alpha });
         const r = await post(`/export/frame?job=${job}&i=${f}`);
         if (!r.ok) throw new Error(`フレーム送信失敗: ${await r.text()}`);
       }

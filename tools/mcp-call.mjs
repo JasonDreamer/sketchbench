@@ -1,5 +1,6 @@
 // 開発中の動作確認: `sb mcp` を起動し、MCPのツールを順に呼ぶ(エージェントアプリと同じ標準入出力の経路)。
 // 使い方: node tools/mcp-call.mjs <sb.exe> <出力フォルダ> '<[{"name":"ツール","arguments":{...}}, ...]>'
+// 呼び出しには __sleep(待つ)と until(結果に文字列が出るまで呼び直す)も使える。
 // 画像の結果は出力フォルダに <連番>_<ツール>_<n>.jpg として保存し、文字の結果は標準出力に出す。
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -34,6 +35,19 @@ for (const c of calls) {
     const r = await req("tools/list", {});
     console.log("tools:", r.result.tools.map((t) => `${t.name}${t.annotations?.destructiveHint ? "(破壊的)" : ""}`).join(", "));
     continue;
+  }
+  // 待つ: {"name":"__sleep","ms":1000}。until を付けると、そのツールの結果の文字列に until が含まれるまで ms ごとに呼び直す(最大 tries 回)
+  if (c.name === "__sleep") {
+    await new Promise((r) => setTimeout(r, c.ms ?? 1000));
+    continue;
+  }
+  if (c.until) {
+    for (let i = 0; i < (c.tries ?? 120); i++) {
+      const r = await req("tools/call", { name: c.name, arguments: c.arguments ?? {} });
+      const text = (r.result?.content ?? []).map((p) => p.text ?? "").join("");
+      if (text.includes(c.until)) break;
+      await new Promise((res) => setTimeout(res, c.ms ?? 1000));
+    }
   }
   const t0 = Date.now();
   const r = await req("tools/call", { name: c.name, arguments: c.arguments ?? {} });

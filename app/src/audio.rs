@@ -346,3 +346,103 @@ pub fn load_stereo(work_dir: &Path, a: &AudioEntry, sr: u32) -> Result<std::sync
     CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, v.clone());
     Ok(v)
 }
+
+/// ミックスのラウドネス(EBU R128 の統合ラウドネス LUFS)とトゥルーピーク(dBTP)。無音なら LUFS は -inf
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Loudness {
+    pub lufs: f64,
+    pub true_peak_db: f64,
+}
+
+pub fn measure_loudness(stereo: &[f32], sr: u32) -> Result<Loudness, String> {
+    use ebur128::{EbuR128, Mode};
+    let mut m = EbuR128::new(2, sr, Mode::I | Mode::TRUE_PEAK).map_err(|e| format!("{e:?}"))?;
+    m.add_frames_f32(stereo).map_err(|e| format!("{e:?}"))?;
+    let lufs = m.loudness_global().map_err(|e| format!("{e:?}"))?;
+    let tp = (0..2).map(|c| m.true_peak(c).unwrap_or(0.0)).fold(0.0f64, f64::max);
+    Ok(Loudness { lufs, true_peak_db: 20.0 * tp.max(1e-12).log10() })
+}
+
+/// 正規化の結果(前後の値と、かけたゲイン)
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Normalized {
+    pub before: Loudness,
+    pub after: Loudness,
+    pub gain_db: f64,
+}
+
+/// 目標のLUFSへ音量を合わせ、トゥルーピークが ceiling_db を超える分は先読みリミッターで抑える。
+/// リミッターで削れた分だけ音量が下がるので、ゲインを足し直しては測ることを繰り返す(最大8回)。
+/// リミッターはサンプル値で効くので、トゥルーピークが超えていれば閾値も下げる。ゲインは +20 dB まで
+pub fn normalize_loudness(stereo: &mut [f32], sr: u32, target_lufs: f64, ceiling_db: f64) -> Result<Normalized, String> {
+    let before = measure_loudness(stereo, sr)?;
+    if !before.lufs.is_finite() {
+        return Ok(Normalized { before, after: before, gain_db: 0.0 });
+    }
+    let original = stereo.to_vec();
+    let mut gain_db = (target_lufs - before.lufs).min(20.0);
+    let mut threshold_db = ceiling_db;
+    let mut after = before;
+    for _ in 0..8 {
+        let g = 10f32.powf(gain_db as f32 / 20.0);
+        for (o, x) in stereo.iter_mut().zip(&original) {
+            *o = x * g;
+        }
+        limit(stereo, sr, 10f32.powf(threshold_db as f32 / 20.0));
+        after = measure_loudness(stereo, sr)?;
+        let peak_ok = after.true_peak_db <= ceiling_db + 0.05;
+        let level_ok = (after.lufs - target_lufs).abs() < 0.2;
+        if peak_ok && level_ok {
+            break;
+        }
+        if !peak_ok {
+            threshold_db -= (after.true_peak_db - ceiling_db).max(0.05);
+        }
+        gain_db = (gain_db + target_lufs - after.lufs).min(20.0);
+    }
+    Ok(Normalized { before, after, gain_db })
+}
+
+/// 先読みリミッター。各サンプルで必要なゲイン(閾値/振幅)を、先読み区間の最小値にしてから、
+/// 手前へなだらかに下げ(アタック)、後ろへゆっくり戻す(リリース)
+fn limit(stereo: &mut [f32], sr: u32, threshold: f32) {
+    let n = stereo.len() / 2;
+    if n == 0 {
+        return;
+    }
+    let look = ((sr as f32) * 0.002) as usize + 1; // 2ms
+    let need: Vec<f32> = (0..n)
+        .map(|i| {
+            let a = stereo[i * 2].abs().max(stereo[i * 2 + 1].abs());
+            if a > threshold { threshold / a } else { 1.0 }
+        })
+        .collect();
+    // 区間 [i, i+look] の最小値(単調な両端キュー)
+    let mut env = vec![1.0f32; n];
+    let mut dq: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for j in (0..n).rev() {
+        while dq.back().is_some_and(|&k| need[k] >= need[j]) {
+            dq.pop_back();
+        }
+        dq.push_back(j);
+        while dq.front().is_some_and(|&k| k > j + look) {
+            dq.pop_front();
+        }
+        env[j] = need[*dq.front().unwrap()];
+    }
+    // アタック: 後ろから、look サンプルかけて下がるようにする
+    let att = 1.0 / look as f32;
+    for i in (0..n - 1).rev() {
+        env[i] = env[i].min(env[i + 1] + att);
+    }
+    // リリース: 80ms の一次遅れで戻す
+    let rel = 1.0 - (-1.0 / (sr as f32 * 0.08)).exp();
+    let mut cur = env[0];
+    for i in 0..n {
+        cur = if env[i] < cur { env[i] } else { cur + (env[i] - cur) * rel };
+        stereo[i * 2] *= cur;
+        stereo[i * 2 + 1] *= cur;
+    }
+}

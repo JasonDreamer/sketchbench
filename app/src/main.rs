@@ -15,6 +15,7 @@ mod mcp;
 mod midi;
 mod midi_live;
 mod player;
+mod queue;
 mod schema;
 mod scheme;
 mod workspace;
@@ -127,6 +128,46 @@ async fn reload_preview(app: AppHandle) -> CmdResult {
 #[tauri::command]
 async fn start_export(app: AppHandle, options: export::ExportOptions) -> CmdResult {
     export::start(&core(&app), options)
+}
+
+/// レンダーキューに積む(複数の仕様をまとめて積める)
+#[tauri::command]
+fn queue_add(app: AppHandle, items: Vec<export::ExportOptions>) -> CmdResult {
+    queue::add(&core(&app), items).map(|ids| serde_json::json!({ "ids": ids }))
+}
+
+#[tauri::command]
+fn queue_list(app: AppHandle) -> CmdResult {
+    Ok(queue::list(&core(&app)))
+}
+
+#[tauri::command]
+fn queue_cancel(app: AppHandle, id: String) -> CmdResult {
+    queue::cancel(&core(&app), &id).map(|_| serde_json::json!({ "ok": true }))
+}
+
+#[tauri::command]
+fn queue_clear(app: AppHandle) -> CmdResult {
+    queue::clear_finished(&core(&app));
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// 開いている作品の音声ミックス全体のラウドネスとトゥルーピーク
+#[tauri::command]
+async fn measure_loudness(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    let dir = c.work_dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = workspace::read_project(&dir)?;
+        if p.audio.is_empty() {
+            return Ok(serde_json::json!({ "audio": false }));
+        }
+        let pcm = audio::mixdown(&dir, &p, 48000, 0, p.duration)?;
+        let l = audio::measure_loudness(&pcm, 48000)?;
+        Ok(serde_json::json!({ "audio": true, "lufs": l.lufs, "truePeakDb": l.true_peak_db }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// project.json を操作で書き換える(取り消し1単位)
@@ -269,6 +310,11 @@ fn main() {
             set_preview_hidden,
             reload_preview,
             start_export,
+            queue_add,
+            queue_list,
+            queue_cancel,
+            queue_clear,
+            measure_loudness,
             edit_project,
             undo,
             redo,
@@ -337,7 +383,7 @@ fn main() {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                     let order = args.iter().position(|a| a == "--order").and_then(|j| args.get(j + 1).cloned());
-                    let opt = export::ExportOptions { work, format, from: None, to: None, order, frames: None, count: None, max_size: None };
+                    let opt = export::ExportOptions { work, format, from: None, to: None, order, frames: None, count: None, max_size: None, ..Default::default() };
                     if let Err(e) = export::start(&c2, opt) {
                         c2.log("export", "error", e, Value::Null);
                         c2.app.exit(1);
