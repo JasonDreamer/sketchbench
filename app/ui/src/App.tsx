@@ -3,11 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Timeline, type Selection, type TimelineApi } from "./Timeline";
 import type { ProjectLike } from "./timeline-model";
+import { ParamPanel, type ParamApi } from "./ParamPanel";
 
 type TimeMsg = { frame: number; playing: boolean; fps: number; duration: number; unixMs: number; audio?: boolean };
 type Log = { source: string; level: string; message: string; unixMs: number };
 type ExportMsg = { id: string; state: "running" | "done" | "failed"; done?: number; total?: number; path?: string; error?: string; elapsed?: number };
-type KeyMsg = { code: string; key: string; shift: boolean; ctrl: boolean };
+type KeyMsg = { code: string; key: string; shift: boolean; ctrl: boolean; alt?: boolean };
 
 export function App() {
   const [works, setWorks] = createSignal<string[]>([]);
@@ -58,6 +59,7 @@ export function App() {
     d.addEventListener("close", () => coverPreview(false), { once: true });
   };
   let timeline: TimelineApi | null = null;
+  let params: ParamApi | null = null;
   let previewEl!: HTMLDivElement;
   let consoleEl!: HTMLDivElement;
   let newDialog!: HTMLDialogElement;
@@ -169,6 +171,7 @@ export function App() {
 
     // ショートカット。プレビュー(別のWebView)で押されたキーもRust経由でここに届く
     const shortcut = (k: KeyMsg) => {
+      if (params?.key(k)) return true;
       if (timeline?.key(k)) return true;
       if (k.ctrl && (k.key === "z" || k.key === "Z")) {
         invoke(k.shift ? "redo" : "undo").then((r: any) => setStatus(`${k.shift ? "やり直し" : "取り消し"}: ${r.label}`), fail).then(refresh);
@@ -182,7 +185,7 @@ export function App() {
     };
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("input, select, textarea, dialog")) return;
-      if (shortcut({ code: e.code, key: e.key, shift: e.shiftKey, ctrl: e.ctrlKey })) e.preventDefault();
+      if (shortcut({ code: e.code, key: e.key, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey })) e.preventDefault();
     };
     addEventListener("keydown", onKey);
     onCleanup(() => removeEventListener("keydown", onKey));
@@ -399,7 +402,12 @@ export function App() {
           </Show>
           <div class="status" aria-live="polite">{status() || "クリック: シーク / ダブルクリック: クリップやマーカーを追加 / ドラッグ: 移動・伸縮(Shiftで吸着なし) / S: 分割 / Delete: 削除 / Ctrl+Z: 取り消し / ホイール: 拡大縮小"}</div>
         </div>
-        <Inspector item={selectedClip()} edit={edit} />
+        <div class="side">
+          <Show when={project()}>
+            {(p) => <ParamPanel project={p()} decls={decls()} frame={currentFrame} edit={edit} status={setStatus} api={(a) => (params = a)} />}
+          </Show>
+          <Inspector item={selectedClip()} edit={edit} />
+        </div>
       </div>
       <div class="console" ref={consoleEl} aria-live="polite">
         <Show when={logs().length === 0}><div class="row src">ログはまだありません。スケッチの変換エラーや実行時の例外はここに出ます。</div></Show>

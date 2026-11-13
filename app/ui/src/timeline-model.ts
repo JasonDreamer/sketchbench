@@ -9,7 +9,7 @@ export interface ProjectLike {
   markers?: { name: string; start: number; end?: number }[];
   audio?: { asset: string; offset?: number }[];
   eventMap?: Record<string, any>;
-  layers: { id: string; sketch: string; tracks?: Record<string, Record<string, Clip>> }[];
+  layers: { id: string; sketch: string; params?: Record<string, unknown>; tracks?: Record<string, Record<string, Clip>> }[];
 }
 
 export interface Clip {
@@ -28,7 +28,24 @@ export type Row =
   | { kind: "markers"; h: number }
   | { kind: "audio"; h: number; asset: string; offset: number }
   | { kind: "events"; h: number; name: string }
-  | { kind: "clips"; h: number; layer: string; track: string; decl: TrackDecl };
+  | { kind: "clips"; h: number; layer: string; track: string; decl: TrackDecl }
+  | { kind: "keys"; h: number; layer: string; param: string; keys: KeyLike[] };
+
+export interface KeyLike {
+  frame: number;
+  value: unknown;
+  ease?: unknown;
+}
+
+/** キーフレームつきの値なら、そのキー(frame順) */
+export function keysOf(v: unknown): KeyLike[] {
+  if (!v || typeof v !== "object" || Array.isArray(v) || !("value" in v)) return [];
+  const keys = (v as { keys?: KeyLike[] }).keys;
+  return Array.isArray(keys) ? [...keys].sort((a, b) => a.frame - b.frame) : [];
+}
+
+/** イージングの切り替え順(E キー) */
+export const EASES = ["linear", "easeInOut", "easeIn", "easeOut", "hold"] as const;
 
 export function rowsOf(p: ProjectLike, decls: Record<string, any>): Row[] {
   const rows: Row[] = [{ kind: "ruler", h: 22 }, { kind: "markers", h: 18 }];
@@ -37,6 +54,11 @@ export function rowsOf(p: ProjectLike, decls: Record<string, any>): Row[] {
   for (const l of p.layers) {
     const tracks = decls?.[l.sketch]?.tracks ?? {};
     for (const [track, decl] of Object.entries<any>(tracks)) rows.push({ kind: "clips", h: 30, layer: l.id, track, decl });
+    // キーのある params だけ行を出す
+    for (const [param, v] of Object.entries(l.params ?? {})) {
+      const keys = keysOf(v);
+      if (keys.length) rows.push({ kind: "keys", h: 18, layer: l.id, param, keys });
+    }
   }
   return rows;
 }

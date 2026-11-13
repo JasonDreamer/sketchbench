@@ -7,6 +7,7 @@ import { rand, seed } from "./rand.js";
 import { createIsf, createRenderer, type Renderer } from "./renderers.js";
 import { loadAudio } from "./audio.js";
 import { makeTracks } from "./tracks.js";
+import { evaluate } from "./keyframes.js";
 import { beatsFn, clearMidiCache, Events, fetchMidi, loadMidi, makeMarkers, MidiTrack, sectionFn, type MarkerInfo } from "./midi.js";
 
 export interface ProjectInfo {
@@ -40,7 +41,10 @@ interface Loaded {
   def: any;
   renderer: Renderer;
   state: unknown;
+  /** project.json の値(キーフレームつきのまま)。描画のたびに評価する */
   params: Record<string, any>;
+  /** params の型(補間のしかたを決める) */
+  types: Record<string, string>;
   tracks: Record<string, any>;
   failedAt: number;
 }
@@ -124,7 +128,7 @@ export class Engine {
         continue;
       }
       if (cur && cur.url === info.url) {
-        cur.params = resolveParams(cur.def, info.params);
+        ({ entries: cur.params, types: cur.types } = resolveParams(cur.def, info.params));
         cur.tracks = makeTracks(cur.def.tracks, info.tracks, this.fps);
         continue;
       }
@@ -170,10 +174,10 @@ export class Engine {
         // rendererの種類が同じならcanvasとコンテキストを使い回す
         renderer = prev && prev.renderer.kind === kind && kind !== "p5" ? prev.renderer : await createRenderer(kind, w, h, this.host);
       }
-      const params = resolveParams(def, info.params);
+      const { entries: params, types } = resolveParams(def, info.params);
       let state: unknown;
       try {
-        state = def.setup ? await def.setup({ width: w, height: h, p: params, assets: assetsApi(this.project), g: renderer.g, canvas: renderer.canvas }) : undefined;
+        state = def.setup ? await def.setup({ width: w, height: h, p: evalParams(params, types, 0), assets: assetsApi(this.project), g: renderer.g, canvas: renderer.canvas }) : undefined;
       } catch (e) {
         if (!prev || prev.renderer !== renderer) renderer.dispose();
         throw e;
@@ -187,9 +191,9 @@ export class Engine {
         }
         if (prev.renderer !== renderer) prev.renderer.dispose();
       }
-      this.layers.set(info.id, { url: info.url!, def, renderer, state, params, tracks: makeTracks(def.tracks, info.tracks, this.fps), failedAt: -1 });
+      this.layers.set(info.id, { url: info.url!, def, renderer, state, params, types, tracks: makeTracks(def.tracks, info.tracks, this.fps), failedAt: -1 });
       post(`/declare?work=${encodeURIComponent(work)}&sketch=${encodeURIComponent(info.sketch)}`, JSON.stringify({
-        mode: def.mode ?? "sequential", renderer: def.renderer ?? (info.kind === "isf" ? "shader" : "canvas2d"), params: def.params ?? null, tracks: def.tracks ?? null,
+        mode: def.mode ?? "sequential", renderer: def.renderer ?? (info.kind === "isf" ? "shader" : "canvas2d"), params: declaredParams(def), tracks: def.tracks ?? null,
       })).catch(() => {});
       log("info", `${info.sketch} を読み込んだ`);
       return true;
@@ -223,7 +227,7 @@ export class Engine {
       const l = this.layers.get(id);
       if (!l) continue;
       seed(this.project.seed ?? 0, frame);
-      const p = this.paramsAt(id, l.params, t);
+      const p = this.paramsAt(id, evalParams(l.params, l.types, frame), t);
       try {
         await l.renderer.frame(() => l.def.draw({ g: l.renderer.g, t, frame, width, height, p, rand, canvas: l.renderer.canvas, events: this.events, section: this.section, beats: this.beats, markers: this.markers, tracks: l.tracks }, l.state));
         l.failedAt = -1;
@@ -246,17 +250,45 @@ function diagError(body: any): Error {
 }
 
 /** params宣言の既定値に、project.json の値({ value } か値そのもの)を重ねる。 */
-function resolveParams(def: any, overrides: Record<string, any>): Record<string, any> {
-  const out: Record<string, any> = {};
-  const decl = def?.params ?? {};
-  for (const [k, v] of Object.entries<any>(decl)) out[k] = v?.default;
+const ISF_TYPES: Record<string, string> = { float: "float", long: "int", bool: "bool", event: "bool", point2d: "vec2", color: "rgba" };
+
+/** params宣言の既定値に project.json の値(キーフレームつきのまま)を重ね、型の表と一緒に返す */
+function resolveParams(def: any, overrides: Record<string, any>): { entries: Record<string, any>; types: Record<string, string> } {
+  const entries: Record<string, any> = {};
+  const types: Record<string, string> = {};
+  for (const [k, v] of Object.entries<any>(def?.params ?? {})) {
+    entries[k] = v?.default;
+    types[k] = v?.type ?? "float";
+  }
   if (def?.isf) {
     for (const i of def.isf.INPUTS ?? def.isf.inputs ?? []) {
       const name = i.NAME ?? i.name;
-      if (name && out[name] === undefined) out[name] = i.DEFAULT ?? i.default;
+      if (!name) continue;
+      if (entries[name] === undefined) entries[name] = i.DEFAULT ?? i.default;
+      types[name] = ISF_TYPES[String(i.TYPE ?? i.type ?? "float").toLowerCase()] ?? "float";
     }
   }
-  for (const [k, v] of Object.entries<any>(overrides ?? {})) out[k] = v && typeof v === "object" && "value" in v ? v.value : v;
+  for (const [k, v] of Object.entries<any>(overrides ?? {})) entries[k] = v;
+  return { entries, types };
+}
+
+/** UIとスキーマに渡すparams宣言。ISFの入力も同じ形(type・default・min・max)にそろえる */
+function declaredParams(def: any): Record<string, any> | null {
+  const out: Record<string, any> = { ...(def?.params ?? {}) };
+  for (const i of def?.isf?.INPUTS ?? def?.isf?.inputs ?? []) {
+    const name = i.NAME ?? i.name;
+    if (!name || out[name]) continue;
+    const type = ISF_TYPES[String(i.TYPE ?? i.type ?? "float").toLowerCase()];
+    if (!type) continue; // image などはparamsにしない
+    out[name] = { type, default: i.DEFAULT ?? i.default, min: i.MIN ?? i.min, max: i.MAX ?? i.max };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** フレーム(レイヤー時刻)での params の値 */
+function evalParams(entries: Record<string, any>, types: Record<string, string>, frame: number): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(entries)) out[k] = evaluate(types[k] ?? "float", v, frame);
   return out;
 }
 

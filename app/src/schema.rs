@@ -12,10 +12,31 @@ fn type_schema(t: &str) -> Value {
         "bool" => json!({ "type": "boolean" }),
         "color" => json!({ "type": "string", "pattern": "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$" }),
         "vec2" => json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }),
+        // ISFの色(0〜1の RGBA)
+        "rgba" => json!({ "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }),
         "curve" => json!({ "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } }),
         "list<text>" => json!({ "type": "array", "items": { "type": "string" } }),
         _ => json!({ "type": "string" }),
     }
+}
+
+/// キーフレームつきの値: { value, keys: [{ frame, value, ease? }] }
+fn keyed_schema(ts: &Value) -> Value {
+    json!({
+        "type": "object",
+        "required": ["value"],
+        "properties": {
+            "value": ts,
+            "keys": { "type": "array", "items": {
+                "type": "object", "required": ["frame", "value"],
+                "properties": {
+                    "frame": { "type": "integer" },
+                    "value": ts,
+                    "ease": { "oneOf": [ { "enum": ["linear", "hold", "easeIn", "easeOut", "easeInOut"] }, { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } ] },
+                },
+            } },
+        },
+    })
 }
 
 fn param_type(decl: &Value) -> String {
@@ -30,13 +51,14 @@ fn layer_schema(decl: &Value) -> Value {
         if let Some(opts) = d["options"].as_array() {
             ts = json!({ "enum": opts });
         }
-        params.insert(name.clone(), json!({ "oneOf": [ ts.clone(), { "type": "object", "required": ["value"], "properties": { "value": ts, "keys": { "type": "array" } } } ] }));
+        params.insert(name.clone(), json!({ "oneOf": [ ts.clone(), keyed_schema(&ts) ] }));
     }
     let mut tracks = serde_json::Map::new();
     for (name, d) in decl["tracks"].as_object().into_iter().flatten() {
         let mut fields = serde_json::Map::new();
         for (f, t) in d["fields"].as_object().into_iter().flatten() {
-            fields.insert(f.clone(), type_schema(t.as_str().unwrap_or("text")));
+            let ts = type_schema(t.as_str().unwrap_or("text"));
+            fields.insert(f.clone(), json!({ "oneOf": [ ts.clone(), keyed_schema(&ts) ] }));
         }
         tracks.insert(
             name.clone(),

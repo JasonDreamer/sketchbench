@@ -192,6 +192,22 @@ pub struct SetParamsArg {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SetKeyframesArg {
+    pub work: String,
+    pub layer: String,
+    /// レイヤーの param 名(クリップのフィールドなら track・clip・field を指定)
+    pub param: Option<String>,
+    pub track: Option<String>,
+    /// クリップのid
+    pub clip: Option<String>,
+    pub field: Option<String>,
+    /// [{ frame, value, ease? }]。frame は param ならレイヤー時刻、クリップならクリップ開始からの相対フレーム。
+    /// ease は次のキーまでの区間に効く: "linear"(既定)・"hold"・"easeIn"・"easeOut"・"easeInOut"・[x1, y1, x2, y2](cubic-bezier)。
+    /// 数値・vec2・色は補間し、それ以外の型は次のキーまで値を保つ。空の配列でキーを外す
+    pub keys: Vec<Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SetLayersArg {
     pub work: String,
     /// レイヤーの配列(project.json の layers と同じ形)。知らないキーは保つ
@@ -435,6 +451,15 @@ impl Tools {
             }
         }
         ok_json(json!({ "ok": true }))
+    }
+
+    #[tool(description = "params(またはクリップのフィールド)のキーフレームを置き換える")]
+    async fn set_keyframes(&self, Parameters(a): Parameters<SetKeyframesArg>) -> Result<CallToolResult, ErrorData> {
+        let target = edit::KeyTarget { layer: a.layer, param: a.param, track: a.track, clip: a.clip, field: a.field };
+        match self.apply(&a.work, edit::Op::SetKeys { target, keys: a.keys }) {
+            Ok(_) => ok_json(json!({ "ok": true })),
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(description = "レイヤー構成と合成設定を丸ごと置き換える。消えたレイヤーのクリップや値も消える", annotations(destructive_hint = true))]

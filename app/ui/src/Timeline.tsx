@@ -1,5 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import { fpsOf, frameOf, rowsOf, snapFrame, xOf, type Clip, type ProjectLike, type Row, type View } from "./timeline-model";
+import { EASES, fpsOf, frameOf, keysOf, rowsOf, snapFrame, xOf, type Clip, type ProjectLike, type Row, type View } from "./timeline-model";
 
 const SB = "http://sb.localhost";
 
@@ -34,9 +34,24 @@ type Drag =
   | { kind: "seek" }
   | { kind: "clip"; mode: "move" | "left" | "right"; sel: Selection; grab: number; start: number; end: number; moved: boolean }
   | { kind: "marker"; index: number; grab: number; start: number; moved: boolean }
-  | { kind: "pan"; x: number; start: number };
+  | { kind: "pan"; x: number; start: number }
+  | { kind: "key"; layer: string; param: string; from: number; grab: number; moved: boolean };
+
+/** 選んだキーフレーム(params の1つ) */
+type KeySel = { layer: string; param: string; frame: number };
 
 const COLORS = { bg: "#1e1f23", row: "#191a1e", line: "#2c2e33", text: "#8b8f98", textStrong: "#d8dade", clip: "#3b4252", clipSel: "#5a6478", accent: "#f2a541", beat: "#33363d", bar: "#4a4e57", wave: "#6f7d91", marker: "#c9a0dc", event: "#7fb3a1" };
+
+/** キーフレームの印(ひし形) */
+function diamond(g: CanvasRenderingContext2D, x: number, y: number, r: number) {
+  g.beginPath();
+  g.moveTo(x, y - r);
+  g.lineTo(x + r, y);
+  g.lineTo(x, y + r);
+  g.lineTo(x - r, y);
+  g.closePath();
+  g.fill();
+}
 
 export function Timeline(props: Props) {
   let canvas!: HTMLCanvasElement;
@@ -46,6 +61,9 @@ export function Timeline(props: Props) {
   /** ドラッグ中のクリップの仮の位置(離したときに操作として送る) */
   const [ghost, setGhost] = createSignal<{ sel: Selection; start: number; end: number } | null>(null);
   const [ghostMarker, setGhostMarker] = createSignal<{ index: number; start: number } | null>(null);
+  const [keySel, setKeySel] = createSignal<KeySel | null>(null);
+  /** ドラッグ中のキーの仮の位置 */
+  const [ghostKey, setGhostKey] = createSignal<number | null>(null);
   let drag: Drag | null = null;
   let tap: { texts: string[]; layer: string; track: string; field: string; times: number[] } | null = null;
 
@@ -130,7 +148,7 @@ export function Timeline(props: Props) {
       g.fillStyle = COLORS.row;
       if (r.kind !== "ruler") g.fillRect(v.gutter, top + 1, w - v.gutter, r.h - 2);
       g.fillStyle = COLORS.text;
-      const label = r.kind === "ruler" ? "" : r.kind === "markers" ? "マーカー" : r.kind === "audio" ? r.asset.replace(/^assets\//, "") : r.kind === "events" ? `イベント ${r.name}` : `${r.layer} ${r.track}`;
+      const label = r.kind === "ruler" ? "" : r.kind === "markers" ? "マーカー" : r.kind === "audio" ? r.asset.replace(/^assets\//, "") : r.kind === "events" ? `イベント ${r.name}` : r.kind === "keys" ? `  ${r.layer}.${r.param}` : `${r.layer} ${r.track}`;
       g.fillText(label, 6, top + r.h / 2, v.gutter - 10);
       if (r.kind === "ruler") {
         const secs = 1 / (v.pxPerFrame * F); // 1pxあたりの秒
@@ -210,8 +228,28 @@ export function Timeline(props: Props) {
           g.rect(x0, top, x1 - x0, r.h);
           g.clip();
           g.fillText(txt, Math.max(v.gutter, x0) + 4, top + r.h / 2);
+          // クリップ内フィールドのキー(クリップ開始からの相対フレーム)を下端に小さく
+          g.fillStyle = COLORS.textStrong;
+          for (const fv of Object.values(c.value ?? {})) for (const k of keysOf(fv)) diamond(g, xOf(v, c.start + k.frame), top + r.h - 6, 3);
           g.restore();
         }
+      } else if (r.kind === "keys") {
+        const ks = keySel();
+        const mid = top + r.h / 2;
+        const dk = drag?.kind === "key" ? drag : null;
+        const frames = r.keys.map((k) => (dk && dk.layer === r.layer && dk.param === r.param && k.frame === dk.from && ghostKey() != null ? ghostKey()! : k.frame));
+        // キーの間: 保持(hold)は点線、それ以外は実線
+        for (let i = 0; i + 1 < r.keys.length; i++) {
+          const a = xOf(v, frames[i]), b = xOf(v, frames[i + 1]);
+          g.fillStyle = COLORS.line;
+          if (r.keys[i].ease === "hold") for (let x = a; x < b; x += 4) g.fillRect(x, mid, 2, 1);
+          else g.fillRect(a, mid, b - a, 1);
+        }
+        r.keys.forEach((k, i) => {
+          const on = ks && ks.layer === r.layer && ks.param === r.param && ks.frame === k.frame;
+          g.fillStyle = on ? COLORS.accent : COLORS.textStrong;
+          diamond(g, xOf(v, frames[i]), mid, on ? 5 : 4);
+        });
       }
       g.fillStyle = COLORS.line;
       g.fillRect(0, top + r.h - 1, w, 1);
@@ -288,6 +326,17 @@ export function Timeline(props: Props) {
         return;
       }
     }
+    if (hit?.row.kind === "keys") {
+      const r = hit.row;
+      const k = r.keys.find((k) => Math.abs(xOf(view(), k.frame) - x) < 6);
+      if (k) {
+        props.select(null);
+        setKeySel({ layer: r.layer, param: r.param, frame: k.frame });
+        drag = { kind: "key", layer: r.layer, param: r.param, from: k.frame, grab: f, moved: false };
+        return;
+      }
+    }
+    setKeySel(null);
     const c = hitClip(x, y);
     if (c?.sel && c.clip && c.mode) {
       props.select(c.sel);
@@ -309,7 +358,10 @@ export function Timeline(props: Props) {
     const f = frameOf(view(), x);
     if (drag.kind === "seek") props.seek(Math.max(0, Math.min(p().duration - 1, Math.round(f))), true);
     else if (drag.kind === "pan") setView((v) => ({ ...v, start: Math.max(0, drag && drag.kind === "pan" ? drag.start - (x - drag.x) / v.pxPerFrame : v.start) }));
-    else if (drag.kind === "marker") {
+    else if (drag.kind === "key") {
+      drag.moved = true;
+      setGhostKey(Math.max(0, snapFrame(p(), audioBeats(), drag.from + (f - drag.grab), view().pxPerFrame, !e.shiftKey)));
+    } else if (drag.kind === "marker") {
       drag.moved = true;
       setGhostMarker({ index: drag.index, start: snapFrame(p(), audioBeats(), drag.start + (f - drag.grab), view().pxPerFrame, !e.shiftKey) });
     } else if (drag.kind === "clip") {
@@ -338,6 +390,17 @@ export function Timeline(props: Props) {
       const ms = (p().markers ?? []).map((m, i) => (i === d.index ? { ...m, start: Math.round(ghostMarker()!.start) } : m));
       await props.edit({ op: "setMarkers", markers: ms });
     }
+    if (d?.kind === "key") {
+      const to = ghostKey();
+      if (d.moved && to != null && to !== d.from) {
+        // 同じフレームに別のキーがあれば置き換える。1回の操作(取り消し1単位)で送る
+        const cur = keysOf(p().layers.find((l) => l.id === d.layer)?.params?.[d.param]);
+        const keys = cur.filter((k) => k.frame !== to).map((k) => (k.frame === d.from ? { ...k, frame: to } : k));
+        await props.edit({ op: "setKeys", target: { layer: d.layer, param: d.param }, keys });
+        setKeySel({ layer: d.layer, param: d.param, frame: to });
+      } else if (!d.moved) props.seek(d.from, false);
+    }
+    setGhostKey(null);
     setGhost(null);
     setGhostMarker(null);
   };
@@ -414,6 +477,21 @@ export function Timeline(props: Props) {
         tap.times.push(Math.round(props.frame()));
         props.status(`区切り ${tap.times.length} 回目(${tap.texts[tap.times.length - 1] ?? "テキストが尽きた"})。Escで確定`);
         if (tap.times.length > tap.texts.length) finishTap();
+        return true;
+      }
+      const ks = keySel();
+      if ((k.key === "Delete" || k.key === "Backspace") && ks) {
+        props.edit({ op: "deleteKey", target: { layer: ks.layer, param: ks.param }, frame: ks.frame });
+        setKeySel(null);
+        return true;
+      }
+      if ((k.key === "e" || k.key === "E") && !k.ctrl && ks) {
+        const cur = keysOf(p().layers.find((l) => l.id === ks.layer)?.params?.[ks.param]);
+        const key = cur.find((x) => x.frame === ks.frame);
+        if (!key) return false;
+        const i = EASES.indexOf((typeof key.ease === "string" ? key.ease : "linear") as (typeof EASES)[number]);
+        const ease = EASES[(i + 1) % EASES.length];
+        props.edit({ op: "setKey", target: { layer: ks.layer, param: ks.param }, frame: ks.frame, value: key.value, ease }).then(() => props.status(`${ks.layer}.${ks.param} のフレーム ${ks.frame} から次のキーまでのイージング: ${ease}`));
         return true;
       }
       if ((k.key === "Delete" || k.key === "Backspace") && sel) {

@@ -134,6 +134,26 @@ export default defineSketch({
 
 クリップは `project.json` の `layers[].tracks.words` に id をキーにして入ります。JSONで直接足すときは配列で書けば、アプリが id を振ります(`{ "start": 120, "end": 180, "value": { "text": "あ" } }`)。
 
+### キーフレーム
+
+params の値と、クリップのフィールドの値は、そのままの値の代わりに `{ "value": 既定値, "keys": [...] }` と書くと時刻で動きます。スケッチ側は何も変えずに `p.density` や `c.value.size` が評価済みの値になります。
+
+```json
+"params": {
+  "density": { "value": 0.4, "keys": [
+    { "frame": 0, "value": 0, "ease": "easeInOut" },
+    { "frame": 120, "value": 1 }
+  ] }
+}
+```
+
+- `frame` は params ならレイヤーの時刻、クリップのフィールドならクリップ開始からの相対フレームです(クリップを動かすとキーも一緒に動きます)
+- `ease` はそのキーから次のキーまでの区間に効きます。`"linear"`(既定)、`"hold"`、`"easeIn"`、`"easeOut"`、`"easeInOut"`、または cubic-bezier の `[x1, y1, x2, y2]`
+- float・int・vec2・color は補間し、それ以外の型(bool、enum、text など)は次のキーまで値を保ちます
+- 最初のキーより前は最初のキーの値、最後のキーより後は最後のキーの値になります
+
+アプリでは、パラメータパネルの項目にカーソルを乗せて `I` でキーを打ち、`Alt+I` で消します。キーのある項目の値を変えると、そのフレームにキーが打たれます。タイムラインの◆はドラッグで移動、`Delete` で削除、`E` でイージングを切り替えます。
+
 ### MIDIコントローラーでparamsを動かす
 
 `project.json` の `ccMap` に `"レイヤー.param": { "cc": 1, "min": 0, "max": 1 }` を書くか、アプリの「MIDI」→「学習」で割り当てます。プレビュー中はコントローラーの値で動き、録音すると `source` に録音ファイルが入り、書き出しではその値を使います。スケッチからライブのMIDI入力は直接読めません(書き出しで結果が変わるため)。
@@ -174,7 +194,7 @@ Sketchbench のMCPサーバー(`sketchbench`)につながっていれば、人�
 | `create_work` / `add_sketch` | テンプレートから作品を作る、作品にスケッチとレイヤーを足す |
 | `render_frames` / `render_contact_sheet` | 描いた画像を返す(長辺1024pxのJPEG) |
 | `get_diagnostics` / `inspect_asset` | 診断、素材の中身(音声のBPM・ビート、MIDIのノートなど) |
-| `set_params` / `set_layers` / `set_event_map` / `get_tracks` / `set_clips` | project.json を変える(直接書かずにこれを使う) |
+| `set_params` / `set_keyframes` / `set_layers` / `set_event_map` / `get_tracks` / `set_clips` | project.json を変える(直接書かずにこれを使う)。`set_keyframes` は params かクリップのフィールドのキーを丸ごと置き換える |
 | `export` | MP4(音声付き)か連番PNGで書き出す |
 | `list_history` / `restore_history` | 履歴(git)の一覧と巻き戻し(その作品だけ) |
 | `get_ui_context` | 人がアプリで指し示しているもの(作品、フレーム、選んだクリップ、プレビュー上で Alt+ドラッグで囲んだ範囲)と画像 |

@@ -39,8 +39,70 @@ pub enum Op {
     AddLayer { sketch: String },
     /// レイヤー構成を丸ごと置き換える
     SetLayers { layers: Vec<Value> },
+    /// キーフレームを1つ打つ(同じフレームにあれば置き換える)。対象は param か、クリップのフィールド
+    #[serde(rename_all = "camelCase")]
+    SetKey { target: KeyTarget, frame: i64, value: Value, ease: Option<Value> },
+    /// キーフレームを1つ消す
+    #[serde(rename_all = "camelCase")]
+    DeleteKey { target: KeyTarget, frame: i64 },
+    /// キーフレームを丸ごと置き換える(MCPの set_keyframes)。空にすると value だけが残る
+    #[serde(rename_all = "camelCase")]
+    SetKeys { target: KeyTarget, keys: Vec<Value> },
     /// クリップを差分で変える(MCPの set_clips)。1回が取り消し1単位
     SetClips { layer: String, track: String, add: Vec<Value>, update: Vec<Value>, delete: Vec<String>, replace: bool },
+}
+
+/// キーフレームを持てる場所: レイヤーの param か、クリップのフィールド(キーの frame はクリップ開始からの相対)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyTarget {
+    pub layer: String,
+    pub param: Option<String>,
+    pub track: Option<String>,
+    pub clip: Option<String>,
+    pub field: Option<String>,
+}
+
+impl KeyTarget {
+    fn describe(&self) -> String {
+        match (&self.param, &self.track, &self.clip, &self.field) {
+            (Some(p), ..) => format!("{}.{p}", self.layer),
+            (None, Some(t), Some(c), Some(f)) => format!("{}.{t}[{c}].{f}", self.layer),
+            _ => self.layer.clone(),
+        }
+    }
+}
+
+/// 対象の値を { value, keys } の形にして返す(ただの値なら包む。なければ value に初期値を入れる)
+fn keyed_mut<'a>(v: &'a mut Value, t: &KeyTarget, init: &Value) -> Result<&'a mut Map<String, Value>, String> {
+    let slot: &mut Value = match (&t.param, &t.track, &t.clip, &t.field) {
+        (Some(p), ..) => {
+            let l = layer_mut(v, &t.layer)?;
+            let params = l.entry("params").or_insert_with(|| json!({}));
+            params.as_object_mut().ok_or("params がオブジェクトではない")?.entry(p.clone()).or_insert_with(|| init.clone())
+        }
+        (None, Some(tr), Some(c), Some(f)) => {
+            let track = track_mut(v, &t.layer, tr)?;
+            let clip = track.get_mut(c).and_then(|c| c.as_object_mut()).ok_or(format!("クリップ {c} がない"))?;
+            let value = clip.entry("value").or_insert_with(|| json!({}));
+            value.as_object_mut().ok_or("value がオブジェクトではない")?.entry(f.clone()).or_insert_with(|| init.clone())
+        }
+        _ => return Err("param か、track・clip・field の組を指定する".into()),
+    };
+    let is_keyed = slot.as_object().is_some_and(|o| o.contains_key("value"));
+    if !is_keyed {
+        let raw = slot.take();
+        *slot = json!({ "value": raw, "keys": [] });
+    }
+    let o = slot.as_object_mut().unwrap();
+    if !o.get("keys").is_some_and(|k| k.is_array()) {
+        o.insert("keys".into(), json!([]));
+    }
+    Ok(o)
+}
+
+fn sort_keys(keys: &mut [Value]) {
+    keys.sort_by_key(|k| k["frame"].as_i64().unwrap_or(0));
 }
 
 impl Op {
@@ -56,6 +118,9 @@ impl Op {
             Op::SetEventMap { .. } => "イベント対応表を変更".into(),
             Op::SetCcMap { .. } => "CC割り当てを変更".into(),
             Op::AddLayer { sketch } => format!("{sketch} のレイヤーを追加"),
+            Op::SetKey { target, frame, .. } => format!("{} にキーを打つ(フレーム {frame})", target.describe()),
+            Op::DeleteKey { target, frame } => format!("{} のキーを消す(フレーム {frame})", target.describe()),
+            Op::SetKeys { target, keys } => format!("{} のキーを{}個に置き換え", target.describe(), keys.len()),
             Op::SetLayers { layers } => format!("レイヤー構成を{}個に置き換え", layers.len()),
             Op::SetClips { add, update, delete, replace, .. } => format!("クリップを変更(追加{} 変更{} 削除{}{})", add.len(), update.len(), delete.len(), if *replace { "、全置換" } else { "" }),
         }
@@ -196,6 +261,39 @@ impl Editor {
             }
             Op::SetEventMap { event_map } => v["eventMap"] = event_map,
             Op::SetCcMap { cc_map } => v["ccMap"] = cc_map,
+            Op::SetKey { target, frame, value, ease } => {
+                let o = keyed_mut(&mut v, &target, &value)?;
+                let keys = o.get_mut("keys").and_then(|k| k.as_array_mut()).unwrap();
+                keys.retain(|k| k["frame"].as_i64() != Some(frame));
+                let mut k = json!({ "frame": frame, "value": value });
+                if let Some(e) = ease {
+                    k["ease"] = e;
+                }
+                keys.push(k);
+                sort_keys(keys);
+            }
+            Op::DeleteKey { target, frame } => {
+                let o = keyed_mut(&mut v, &target, &Value::Null)?;
+                // キーを消したときは、そのキーの値を value に残す(全部消えても値が飛ばないように)
+                let keys = o.get_mut("keys").and_then(|k| k.as_array_mut()).unwrap();
+                let removed = keys.iter().position(|k| k["frame"].as_i64() == Some(frame)).map(|i| keys.remove(i));
+                let empty = keys.is_empty();
+                if let (Some(r), true) = (removed, empty) {
+                    o.insert("value".into(), r["value"].clone());
+                }
+            }
+            Op::SetKeys { target, keys } => {
+                for k in &keys {
+                    if k["frame"].as_i64().is_none() || k.get("value").is_none() {
+                        return Err("各キーに frame(整数)と value が要る".into());
+                    }
+                }
+                let init = keys.first().map(|k| k["value"].clone()).unwrap_or(Value::Null);
+                let o = keyed_mut(&mut v, &target, &init)?;
+                let mut keys = keys;
+                sort_keys(&mut keys);
+                o.insert("keys".into(), json!(keys));
+            }
             Op::AddLayer { sketch } => {
                 let dur = v["duration"].as_i64().unwrap_or(300);
                 let ls = v["layers"].as_array_mut().ok_or("layers がない")?;

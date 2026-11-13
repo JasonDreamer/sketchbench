@@ -30,11 +30,31 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .bar .time b { color: var(--text); font-weight: 600; }
 .preview { position: relative; background: #000; min-height: 0; }
 .preview .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 24px; }
-.lower { display: grid; grid-template-columns: 1fr 260px; border-top: 1px solid var(--line); max-height: 45vh; min-height: 120px; }
+.lower { display: grid; grid-template-columns: 1fr 300px; border-top: 1px solid var(--line); max-height: 45vh; min-height: 120px; }
 .timeline-wrap { overflow: auto; display: flex; flex-direction: column; min-width: 0; }
 .timeline { width: 100%; display: block; touch-action: none; }
 .status { color: var(--muted); padding: 2px 8px; font-size: 12px; border-top: 1px solid var(--line); }
-.inspector { border-left: 1px solid var(--line); padding: 8px; overflow: auto; background: var(--panel); }
+.side { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; min-height: 0; }
+.inspector { padding: 8px; border-top: 1px solid var(--line); }
+/* Tweakpane は既定で浮かせたパネルの見た目なので、周りの面に合わせる */
+.params {
+  padding: 6px;
+  --tp-base-background-color: var(--panel);
+  --tp-base-shadow-color: transparent;
+  --tp-base-font-family: "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+  --tp-label-foreground-color: var(--muted);
+  --tp-blade-value-width: 150px;
+}
+.params:not([data-empty]) .params-empty, .params[data-empty] .tp-rotv { display: none; }
+.params .tp-rotv { font-size: 12px; }
+.params .kf {
+  width: 14px; height: 14px; padding: 0; margin-right: 4px; vertical-align: -2px;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer; line-height: 1; font-size: 11px;
+}
+.params .kf::before { content: "◇"; opacity: 0.35; }
+.params .kf[data-state="keyed"]::before { opacity: 1; }
+.params .kf[data-state="on"]::before { content: "◆"; opacity: 1; color: var(--text); }
+.params .kf:focus-visible { outline: 2px solid var(--accent); }
 .inspector .fields { display: grid; gap: 6px; }
 .inspector label { display: grid; gap: 2px; color: var(--muted); }
 .hint { color: var(--muted); padding: 8px; }

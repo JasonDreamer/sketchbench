@@ -1,5 +1,8 @@
 // クリップトラック。GUIで作った「どの時刻に、何を」をスケッチから時刻で引く。
 // クリップの時刻は作品時刻のフレームで保存し、at(t) は秒の作品時刻で引く。
+// フィールドの値は { value, keys } にでき、キーの frame はクリップ開始からの相対フレーム(クリップを動かすとキーも一緒に動く)。
+
+import { evaluate, isKeyed } from "./keyframes.js";
 
 export interface TrackDecl {
   fields: Record<string, string>;
@@ -31,7 +34,7 @@ export interface ActiveClip<V = Record<string, unknown>> {
 export class ClipTrack {
   private clips: (ClipData & { id: string; index: number; startSec: number; endSec: number })[];
 
-  constructor(data: Record<string, ClipData>, private decl: TrackDecl, fps: number) {
+  constructor(data: Record<string, ClipData>, private decl: TrackDecl, private fps: number) {
     // 開始時刻順、同時なら作成順(JSONでの並び)
     const list = Object.entries(data ?? {}).map(([id, c], order) => ({ id, order, ...c }));
     list.sort((a, b) => a.start - b.start || a.order - b.order);
@@ -47,10 +50,20 @@ export class ClipTrack {
       if (t >= c.endSec + tail) continue;
       const dur = Math.max(1e-9, c.endSec - c.startSec);
       out.push({
-        id: c.id, value: c.value, index: c.index, start: c.startSec, end: c.endSec,
+        id: c.id, value: this.valueAt(c.value, (t - c.startSec) * this.fps), index: c.index, start: c.startSec, end: c.endSec,
         elapsed: t - c.startSec, progress: Math.min(1, (t - c.startSec) / dur), after: Math.max(0, t - c.endSec),
       });
     }
+    return out;
+  }
+
+  /** キーフレームつきのフィールドを、クリップ開始からのフレームで評価する */
+  private valueAt(value: Record<string, unknown>, rel: number): Record<string, unknown> {
+    let keyed = false;
+    for (const v of Object.values(value ?? {})) if (isKeyed(v)) keyed = true;
+    if (!keyed) return value;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = evaluate(this.decl.fields[k] ?? "text", v, rel);
     return out;
   }
 
