@@ -201,6 +201,8 @@ pub struct SetKeyframesArg {
     /// クリップのid
     pub clip: Option<String>,
     pub field: Option<String>,
+    /// レイヤーの合成の値("opacity"・"transform.position"・"transform.scale"・"transform.rotation"・"transform.anchor")。frame はレイヤー時刻
+    pub property: Option<String>,
     /// [{ frame, value, ease? }]。frame は param ならレイヤー時刻、クリップならクリップ開始からの相対フレーム。
     /// ease は次のキーまでの区間に効く: "linear"(既定)・"hold"・"easeIn"・"easeOut"・"easeInOut"・[x1, y1, x2, y2](cubic-bezier)。
     /// 数値・vec2・色は補間し、それ以外の型は次のキーまで値を保つ。空の配列でキーを外す
@@ -212,6 +214,17 @@ pub struct SetLayersArg {
     pub work: String,
     /// レイヤーの配列(project.json の layers と同じ形)。知らないキーは保つ
     pub layers: Vec<Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateLayerArg {
+    pub work: String,
+    pub layer: String,
+    /// 変えるキーと値(null で消す)。start・end(作品のフレーム)、offset(レイヤーのフレーム)、speed、
+    /// opacity(0〜1)、blend("normal"・"add"・"multiply"・"screen"・"difference")、
+    /// transform({ position: [x, y](出力のピクセル), scale: 数値か[x, y], rotation: 度(時計回り), anchor: [x, y](レイヤーのピクセル) })、
+    /// matte({ layer, mode: "alpha"・"alphaInverted"・"luma"・"lumaInverted" })、resolution(0.1〜1)、visible
+    pub set: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -455,7 +468,7 @@ impl Tools {
 
     #[tool(description = "params(またはクリップのフィールド)のキーフレームを置き換える")]
     async fn set_keyframes(&self, Parameters(a): Parameters<SetKeyframesArg>) -> Result<CallToolResult, ErrorData> {
-        let target = edit::KeyTarget { layer: a.layer, param: a.param, track: a.track, clip: a.clip, field: a.field };
+        let target = edit::KeyTarget { layer: a.layer, param: a.param, track: a.track, clip: a.clip, field: a.field, property: a.property };
         match self.apply(&a.work, edit::Op::SetKeys { target, keys: a.keys }) {
             Ok(_) => ok_json(json!({ "ok": true })),
             Err(e) => fail(e),
@@ -465,6 +478,14 @@ impl Tools {
     #[tool(description = "レイヤー構成と合成設定を丸ごと置き換える。消えたレイヤーのクリップや値も消える", annotations(destructive_hint = true))]
     async fn set_layers(&self, Parameters(a): Parameters<SetLayersArg>) -> Result<CallToolResult, ErrorData> {
         match self.apply(&a.work, edit::Op::SetLayers { layers: a.layers }) {
+            Ok(_) => ok_json(json!({ "ok": true })),
+            Err(e) => fail(e),
+        }
+    }
+
+    #[tool(description = "レイヤー1つの設定(時間・不透明度・ブレンド・変形・マット・内部解像度)を部分的に変える")]
+    async fn update_layer(&self, Parameters(a): Parameters<UpdateLayerArg>) -> Result<CallToolResult, ErrorData> {
+        match self.apply(&a.work, edit::Op::UpdateLayer { layer: a.layer, set: a.set }) {
             Ok(_) => ok_json(json!({ "ok": true })),
             Err(e) => fail(e),
         }

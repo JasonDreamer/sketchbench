@@ -64,6 +64,7 @@ export function App() {
   let consoleEl!: HTMLDivElement;
   let newDialog!: HTMLDialogElement;
   let bulkDialog!: HTMLDialogElement;
+  let layerDialog!: HTMLDialogElement;
 
   const refresh = async () => {
     const s: any = await invoke("get_state");
@@ -368,6 +369,7 @@ export function App() {
         <button onClick={openHistory} disabled={!work()}>履歴</button>
         <button onClick={openMidi}>MIDI</button>
         <Show when={recording()}><span class="rec" title="MIDIを録音している(再生中の入力だけを記録)">● 録音中</span></Show>
+        <button onClick={() => openDialog(layerDialog)} disabled={!work()} title="作品の中のスケッチを1つ選んでレイヤーにする(一番上に重なる)">レイヤー追加</button>
         <button onClick={() => openDialog(bulkDialog)} disabled={clipTracks().length === 0} title="改行区切りのテキストをクリップにする">一括入力</button>
         <span class="spacer" />
         <ExportState exp={exp()} />
@@ -492,6 +494,20 @@ export function App() {
           </Show>
           <div class="actions"><button onClick={() => historyDialog.close()}>閉じる</button></div>
         </div>
+      </dialog>
+      <dialog ref={layerDialog}>
+        <form onSubmit={(ev) => { ev.preventDefault(); const fd = new FormData(ev.currentTarget); layerDialog.close(); edit({ op: "addLayer", sketch: String(fd.get("sketch")) }); }}>
+          <label>スケッチ
+            <select name="sketch">
+              <For each={[...new Set([...(project()?.layers.map((l) => l.sketch) ?? []), ...Object.keys(decls())])]}>{(sk) => <option value={sk}>{sk}</option>}</For>
+            </select>
+          </label>
+          <p class="hint">新しいスケッチはエージェント(MCPの add_sketch)か、works/{work()}/sketches/ にフォルダを置いて作ります。</p>
+          <div class="actions">
+            <button type="button" onClick={() => layerDialog.close()}>やめる</button>
+            <button type="submit">追加</button>
+          </div>
+        </form>
       </dialog>
       <dialog ref={bulkDialog}>
         <form onSubmit={bulk}>

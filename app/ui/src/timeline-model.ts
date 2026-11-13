@@ -9,7 +9,44 @@ export interface ProjectLike {
   markers?: { name: string; start: number; end?: number }[];
   audio?: { asset: string; offset?: number }[];
   eventMap?: Record<string, any>;
-  layers: { id: string; sketch: string; params?: Record<string, unknown>; tracks?: Record<string, Record<string, Clip>> }[];
+  width?: number;
+  height?: number;
+  layers: LayerLike[];
+}
+
+export interface LayerLike {
+  id: string;
+  sketch: string;
+  params?: Record<string, unknown>;
+  tracks?: Record<string, Record<string, Clip>>;
+  start?: number;
+  end?: number;
+  offset?: number;
+  speed?: number;
+  opacity?: unknown;
+  blend?: string;
+  transform?: Record<string, unknown>;
+  matte?: { layer: string; mode?: string };
+  resolution?: number;
+  visible?: boolean;
+}
+
+/** キーを打てるレイヤーの値(project.json での場所) */
+export const LAYER_PROPS = ["opacity", "transform.position", "transform.scale", "transform.rotation", "transform.anchor"] as const;
+
+/** レイヤーの値を "transform.position" のような道筋で引く */
+export function propOf(l: LayerLike, path: string): unknown {
+  return path.split(".").reduce<any>((o, k) => (o == null ? undefined : o[k]), l);
+}
+
+/** 作品のフレーム → レイヤーのフレーム(paramsと合成の値のキーはレイヤーのフレームで持つ) */
+export function layerFrame(l: LayerLike, frame: number): number {
+  return (frame - (l.start ?? 0)) * (l.speed || 1) + (l.offset ?? 0);
+}
+
+/** レイヤーのフレーム → 作品のフレーム */
+export function workFrame(l: LayerLike, lf: number): number {
+  return (l.start ?? 0) + (lf - (l.offset ?? 0)) / (l.speed || 1);
 }
 
 export interface Clip {
@@ -29,7 +66,9 @@ export type Row =
   | { kind: "audio"; h: number; asset: string; offset: number }
   | { kind: "events"; h: number; name: string }
   | { kind: "clips"; h: number; layer: string; track: string; decl: TrackDecl }
-  | { kind: "keys"; h: number; layer: string; param: string; keys: KeyLike[] };
+  | { kind: "layer"; h: number; layer: string }
+  /** param か、合成の値(prop: "opacity" など)のキー */
+  | { kind: "keys"; h: number; layer: string; param?: string; prop?: string; keys: KeyLike[] };
 
 export interface KeyLike {
   frame: number;
@@ -51,7 +90,13 @@ export function rowsOf(p: ProjectLike, decls: Record<string, any>): Row[] {
   const rows: Row[] = [{ kind: "ruler", h: 22 }, { kind: "markers", h: 18 }];
   for (const a of p.audio ?? []) rows.push({ kind: "audio", h: 48, asset: a.asset, offset: a.offset ?? 0 });
   for (const name of Object.keys(p.eventMap ?? {})) rows.push({ kind: "events", h: 16, name });
-  for (const l of p.layers) {
+  // 上のレイヤーを上に(合成の順は layers の後ろほど上)
+  for (const l of [...p.layers].reverse()) {
+    rows.push({ kind: "layer", h: 20, layer: l.id });
+    for (const prop of LAYER_PROPS) {
+      const keys = keysOf(propOf(l, prop));
+      if (keys.length) rows.push({ kind: "keys", h: 18, layer: l.id, prop, keys });
+    }
     const tracks = decls?.[l.sketch]?.tracks ?? {};
     for (const [track, decl] of Object.entries<any>(tracks)) rows.push({ kind: "clips", h: 30, layer: l.id, track, decl });
     // キーのある params だけ行を出す

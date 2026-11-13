@@ -179,8 +179,9 @@ export interface DrawContext<R extends RendererKind, P extends Record<string, Pa
   g: RendererMap[R];
   /** 秒(レイヤー時刻)。書き出し時も同じ値 */
   t: number;
-  /** フレーム番号 */
+  /** フレーム番号(レイヤー時刻) */
   frame: number;
+  /** このレイヤーの描画の大きさ(内部解像度を反映した値) */
   width: number;
   height: number;
   /** params宣言から作った値(project.json の値で上書きされる) */
@@ -196,8 +197,10 @@ export interface DrawContext<R extends RendererKind, P extends Record<string, Pa
   section(name: string, t: number): number;
   /** 拍単位の時刻(project.json の bpm と beatOffset から)。bpm がなければ NaN */
   beats(t: number): number;
-  /** マーカーの区間(秒) */
+  /** マーカーの区間(作品時刻の秒) */
   markers: readonly { name: string; start: number; end: number }[];
+  /** 他のレイヤーの描画結果。自分より下にあり、今のフレームで出ているレイヤーだけ引ける(それ以外は null) */
+  inputs: { layer(id: string): HTMLCanvasElement | null };
 }
 
 export interface SketchDef<R extends RendererKind, P extends Record<string, ParamDecl>, S, T extends Record<string, TrackDecl> = {}> {

@@ -1,5 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import { EASES, fpsOf, frameOf, keysOf, rowsOf, snapFrame, xOf, type Clip, type ProjectLike, type Row, type View } from "./timeline-model";
+import { EASES, fpsOf, frameOf, keysOf, layerFrame, propOf, rowsOf, snapFrame, workFrame, xOf, type Clip, type LayerLike, type ProjectLike, type Row, type View } from "./timeline-model";
 
 const SB = "http://sb.localhost";
 
@@ -35,10 +35,14 @@ type Drag =
   | { kind: "clip"; mode: "move" | "left" | "right"; sel: Selection; grab: number; start: number; end: number; moved: boolean }
   | { kind: "marker"; index: number; grab: number; start: number; moved: boolean }
   | { kind: "pan"; x: number; start: number }
-  | { kind: "key"; layer: string; param: string; from: number; grab: number; moved: boolean };
+  | { kind: "key"; sel: KeySel; fromWork: number; grab: number; moved: boolean }
+  | { kind: "layer"; mode: "move" | "left" | "right"; layer: string; grab: number; start: number; end: number; moved: boolean };
 
-/** 選んだキーフレーム(params の1つ) */
-type KeySel = { layer: string; param: string; frame: number };
+/** 選んだキーフレーム。param か合成の値(prop)の、レイヤーのフレーム */
+type KeySel = { layer: string; param?: string; prop?: string; frame: number };
+const sameRow = (a: { layer: string; param?: string; prop?: string }, b: { layer: string; param?: string; prop?: string }) =>
+  a.layer === b.layer && a.param === b.param && a.prop === b.prop;
+const keyTarget = (k: KeySel) => (k.param ? { layer: k.layer, param: k.param } : { layer: k.layer, property: k.prop });
 
 const COLORS = { bg: "#1e1f23", row: "#191a1e", line: "#2c2e33", text: "#8b8f98", textStrong: "#d8dade", clip: "#3b4252", clipSel: "#5a6478", accent: "#f2a541", beat: "#33363d", bar: "#4a4e57", wave: "#6f7d91", marker: "#c9a0dc", event: "#7fb3a1" };
 
@@ -64,6 +68,15 @@ export function Timeline(props: Props) {
   const [keySel, setKeySel] = createSignal<KeySel | null>(null);
   /** ドラッグ中のキーの仮の位置 */
   const [ghostKey, setGhostKey] = createSignal<number | null>(null);
+  /** ドラッグ中のレイヤーの仮の区間 */
+  const [ghostLayer, setGhostLayer] = createSignal<{ layer: string; start: number; end: number } | null>(null);
+  const layerById = (id: string): LayerLike | undefined => p().layers.find((l) => l.id === id);
+  const spanOf = (l: LayerLike) => ({ start: l.start ?? 0, end: l.end ?? p().duration });
+  const keysFor = (k: { layer: string; param?: string; prop?: string }) => {
+    const l = layerById(k.layer);
+    if (!l) return [];
+    return keysOf(k.param ? l.params?.[k.param] : propOf(l, k.prop!));
+  };
   let drag: Drag | null = null;
   let tap: { texts: string[]; layer: string; track: string; field: string; times: number[] } | null = null;
 
@@ -148,7 +161,7 @@ export function Timeline(props: Props) {
       g.fillStyle = COLORS.row;
       if (r.kind !== "ruler") g.fillRect(v.gutter, top + 1, w - v.gutter, r.h - 2);
       g.fillStyle = COLORS.text;
-      const label = r.kind === "ruler" ? "" : r.kind === "markers" ? "マーカー" : r.kind === "audio" ? r.asset.replace(/^assets\//, "") : r.kind === "events" ? `イベント ${r.name}` : r.kind === "keys" ? `  ${r.layer}.${r.param}` : `${r.layer} ${r.track}`;
+      const label = r.kind === "ruler" ? "" : r.kind === "markers" ? "マーカー" : r.kind === "audio" ? r.asset.replace(/^assets\//, "") : r.kind === "events" ? `イベント ${r.name}` : r.kind === "keys" ? `  ${r.layer}.${r.param ?? r.prop}` : r.kind === "layer" ? `${r.layer}  ${layerById(r.layer)?.sketch.replace(/^sketches\//, "") ?? ""}` : `${r.layer} ${r.track}`;
       g.fillText(label, 6, top + r.h / 2, v.gutter - 10);
       if (r.kind === "ruler") {
         const secs = 1 / (v.pxPerFrame * F); // 1pxあたりの秒
@@ -237,7 +250,8 @@ export function Timeline(props: Props) {
         const ks = keySel();
         const mid = top + r.h / 2;
         const dk = drag?.kind === "key" ? drag : null;
-        const frames = r.keys.map((k) => (dk && dk.layer === r.layer && dk.param === r.param && k.frame === dk.from && ghostKey() != null ? ghostKey()! : k.frame));
+        const l = layerById(r.layer)!;
+        const frames = r.keys.map((k) => (dk && sameRow(dk.sel, r) && k.frame === dk.sel.frame && ghostKey() != null ? ghostKey()! : workFrame(l, k.frame)));
         // キーの間: 保持(hold)は点線、それ以外は実線
         for (let i = 0; i + 1 < r.keys.length; i++) {
           const a = xOf(v, frames[i]), b = xOf(v, frames[i + 1]);
@@ -246,10 +260,24 @@ export function Timeline(props: Props) {
           else g.fillRect(a, mid, b - a, 1);
         }
         r.keys.forEach((k, i) => {
-          const on = ks && ks.layer === r.layer && ks.param === r.param && ks.frame === k.frame;
+          const on = ks && sameRow(ks, r) && ks.frame === k.frame;
           g.fillStyle = on ? COLORS.accent : COLORS.textStrong;
           diamond(g, xOf(v, frames[i]), mid, on ? 5 : 4);
         });
+      } else if (r.kind === "layer") {
+        const l = layerById(r.layer);
+        if (l) {
+          const gl = ghostLayer();
+          const { start, end } = gl && gl.layer === r.layer ? gl : spanOf(l);
+          const x0 = Math.max(v.gutter, xOf(v, start)), x1 = xOf(v, end);
+          g.fillStyle = l.visible === false ? COLORS.line : COLORS.bar;
+          if (x1 > x0) g.fillRect(x0, top + 4, x1 - x0, r.h - 8);
+          // マットに使われているレイヤーは帯に印
+          if (p().layers.some((o) => o.matte?.layer === l.id)) {
+            g.fillStyle = COLORS.textStrong;
+            g.fillText("マット", x0 + 4, top + r.h / 2);
+          }
+        }
       }
       g.fillStyle = COLORS.line;
       g.fillRect(0, top + r.h - 1, w, 1);
@@ -328,12 +356,26 @@ export function Timeline(props: Props) {
     }
     if (hit?.row.kind === "keys") {
       const r = hit.row;
-      const k = r.keys.find((k) => Math.abs(xOf(view(), k.frame) - x) < 6);
+      const l = layerById(r.layer)!;
+      const k = r.keys.find((k) => Math.abs(xOf(view(), workFrame(l, k.frame)) - x) < 6);
       if (k) {
         props.select(null);
-        setKeySel({ layer: r.layer, param: r.param, frame: k.frame });
-        drag = { kind: "key", layer: r.layer, param: r.param, from: k.frame, grab: f, moved: false };
+        const sel = { layer: r.layer, param: r.param, prop: r.prop, frame: k.frame };
+        setKeySel(sel);
+        drag = { kind: "key", sel, fromWork: workFrame(l, k.frame), grab: f, moved: false };
         return;
+      }
+    }
+    if (hit?.row.kind === "layer") {
+      const l = layerById(hit.row.layer);
+      if (l) {
+        const { start, end } = spanOf(l);
+        const edge = 6 / view().pxPerFrame;
+        if (f >= start - edge && f <= end + edge) {
+          const mode = Math.abs(f - start) < edge ? "left" : Math.abs(f - end) < edge ? "right" : "move";
+          drag = { kind: "layer", mode, layer: l.id, grab: f, start, end, moved: false };
+          return;
+        }
       }
     }
     setKeySel(null);
@@ -360,7 +402,19 @@ export function Timeline(props: Props) {
     else if (drag.kind === "pan") setView((v) => ({ ...v, start: Math.max(0, drag && drag.kind === "pan" ? drag.start - (x - drag.x) / v.pxPerFrame : v.start) }));
     else if (drag.kind === "key") {
       drag.moved = true;
-      setGhostKey(Math.max(0, snapFrame(p(), audioBeats(), drag.from + (f - drag.grab), view().pxPerFrame, !e.shiftKey)));
+      setGhostKey(snapFrame(p(), audioBeats(), drag.fromWork + (f - drag.grab), view().pxPerFrame, !e.shiftKey));
+    } else if (drag.kind === "layer") {
+      drag.moved = true;
+      const d = f - drag.grab;
+      const sn = (fr: number) => snapFrame(p(), audioBeats(), fr, view().pxPerFrame, !e.shiftKey);
+      let { start, end } = drag;
+      if (drag.mode === "move") {
+        const ns = Math.max(0, sn(start + d));
+        end = ns + (end - start);
+        start = ns;
+      } else if (drag.mode === "left") start = Math.max(0, Math.min(end - 1, sn(start + d)));
+      else end = Math.max(start + 1, sn(end + d));
+      setGhostLayer({ layer: drag.layer, start, end });
     } else if (drag.kind === "marker") {
       drag.moved = true;
       setGhostMarker({ index: drag.index, start: snapFrame(p(), audioBeats(), drag.start + (f - drag.grab), view().pxPerFrame, !e.shiftKey) });
@@ -391,15 +445,25 @@ export function Timeline(props: Props) {
       await props.edit({ op: "setMarkers", markers: ms });
     }
     if (d?.kind === "key") {
-      const to = ghostKey();
-      if (d.moved && to != null && to !== d.from) {
+      const l = layerById(d.sel.layer)!;
+      const g = ghostKey();
+      const to = g == null ? d.sel.frame : Math.round(layerFrame(l, g));
+      if (d.moved && to !== d.sel.frame) {
         // 同じフレームに別のキーがあれば置き換える。1回の操作(取り消し1単位)で送る
-        const cur = keysOf(p().layers.find((l) => l.id === d.layer)?.params?.[d.param]);
-        const keys = cur.filter((k) => k.frame !== to).map((k) => (k.frame === d.from ? { ...k, frame: to } : k));
-        await props.edit({ op: "setKeys", target: { layer: d.layer, param: d.param }, keys });
-        setKeySel({ layer: d.layer, param: d.param, frame: to });
-      } else if (!d.moved) props.seek(d.from, false);
+        const keys = keysFor(d.sel).filter((k) => k.frame !== to).map((k) => (k.frame === d.sel.frame ? { ...k, frame: to } : k));
+        await props.edit({ op: "setKeys", target: keyTarget(d.sel), keys });
+        setKeySel({ ...d.sel, frame: to });
+      } else if (!d.moved) props.seek(Math.max(0, Math.round(d.fromWork)), false);
     }
+    if (d?.kind === "layer" && d.moved && ghostLayer()) {
+      const gl = ghostLayer()!;
+      const l = layerById(d.layer)!;
+      const set: Record<string, unknown> = { start: Math.round(gl.start), end: Math.round(gl.end) };
+      // 左端を詰めたときは中身をその場に残す(AEと同じ)。動かしたときは中身ごと動く
+      if (d.mode === "left") set.offset = (l.offset ?? 0) + (gl.start - d.start) * (l.speed || 1);
+      await props.edit({ op: "updateLayer", layer: d.layer, set });
+    }
+    setGhostLayer(null);
     setGhostKey(null);
     setGhost(null);
     setGhostMarker(null);
@@ -481,17 +545,16 @@ export function Timeline(props: Props) {
       }
       const ks = keySel();
       if ((k.key === "Delete" || k.key === "Backspace") && ks) {
-        props.edit({ op: "deleteKey", target: { layer: ks.layer, param: ks.param }, frame: ks.frame });
+        props.edit({ op: "deleteKey", target: keyTarget(ks), frame: ks.frame });
         setKeySel(null);
         return true;
       }
       if ((k.key === "e" || k.key === "E") && !k.ctrl && ks) {
-        const cur = keysOf(p().layers.find((l) => l.id === ks.layer)?.params?.[ks.param]);
-        const key = cur.find((x) => x.frame === ks.frame);
+        const key = keysFor(ks).find((x) => x.frame === ks.frame);
         if (!key) return false;
         const i = EASES.indexOf((typeof key.ease === "string" ? key.ease : "linear") as (typeof EASES)[number]);
         const ease = EASES[(i + 1) % EASES.length];
-        props.edit({ op: "setKey", target: { layer: ks.layer, param: ks.param }, frame: ks.frame, value: key.value, ease }).then(() => props.status(`${ks.layer}.${ks.param} のフレーム ${ks.frame} から次のキーまでのイージング: ${ease}`));
+        props.edit({ op: "setKey", target: keyTarget(ks), frame: ks.frame, value: key.value, ease }).then(() => props.status(`${ks.layer}.${ks.param ?? ks.prop} のフレーム ${ks.frame} から次のキーまでのイージング: ${ease}`));
         return true;
       }
       if ((k.key === "Delete" || k.key === "Backspace") && sel) {

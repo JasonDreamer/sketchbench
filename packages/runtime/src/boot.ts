@@ -243,8 +243,7 @@ async function exportJob() {
           }
         }
       } else {
-        const px = engine.out2d.getImageData(0, 0, width, height).data;
-        sharedView!.set(px);
+        engine.readPixels(sharedView!);
         const r = await post(`/export/frame?job=${job}&i=${f}`);
         if (!r.ok) throw new Error(`フレーム送信失敗: ${await r.text()}`);
       }

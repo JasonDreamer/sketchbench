@@ -154,6 +154,33 @@ params の値と、クリップのフィールドの値は、そのままの値�
 
 アプリでは、パラメータパネルの項目にカーソルを乗せて `I` でキーを打ち、`Alt+I` で消します。キーのある項目の値を変えると、そのフレームにキーが打たれます。タイムラインの◆はドラッグで移動、`Delete` で削除、`E` でイージングを切り替えます。
 
+### レイヤーの合成
+
+`project.json` の `layers` は先頭が一番下で、後ろほど上に重なります。各レイヤーに次の設定を書けます(省略時の値はかっこ内)。
+
+| キー | 内容 |
+| --- | --- |
+| `start` / `end` | 作品のフレームで、レイヤーが出る区間(0 / 尺) |
+| `offset` / `speed` | レイヤー時刻の起点と速度(0 / 1)。スケッチの `t`・`frame` は `(作品のフレーム − start) × speed + offset` |
+| `opacity` | 不透明度 0〜1(1)。キーフレーム可 |
+| `blend` | `"normal"`・`"add"`・`"multiply"`・`"screen"`・`"difference"`("normal") |
+| `transform` | `position`(出力のピクセル、中央)、`scale`(数値か `[x, y]`、1)、`rotation`(度、時計回り、0)、`anchor`(レイヤーのピクセル、中央)。どれもキーフレーム可 |
+| `matte` | `{ "layer": "id", "mode": "alpha" }` で別のレイヤーのアルファか輝度で切り抜く(mode は alpha・alphaInverted・luma・lumaInverted)。マットに使ったレイヤーは単独では表示されない |
+| `resolution` | 内部解像度 0.1〜1(1)。重いレイヤーだけ下げる。スケッチの `width`・`height` はこの倍率をかけた値 |
+| `visible` | `false` で合成に入れない(true) |
+
+```json
+{ "id": "words", "sketch": "sketches/words", "start": 120, "blend": "screen",
+  "transform": { "rotation": { "value": 0, "keys": [{ "frame": 0, "value": -5 }, { "frame": 30, "value": 0, "ease": "easeOut" }] } },
+  "matte": { "layer": "mask", "mode": "luma" } }
+```
+
+合成の値(opacity と transform)とparamsのキーの `frame` はレイヤーのフレームです。レイヤーを動かすとキーも一緒に動きます。
+
+ほかのレイヤーの描画結果は `inputs.layer("id")` でcanvasとして引けます(`g.drawImage(inputs.layer("bg"), 0, 0)` など)。引けるのは自分より下にあり、今のフレームで出ているレイヤーだけで、それ以外は null です。
+
+音声・MIDI・`events`・`section`・`beats`・`tracks` の関数には、スケッチが受け取った `t`(レイヤー時刻)をそのまま渡せます。アプリが作品時刻に直して引きます。`markers` と、`song.beats` などの時刻の配列は作品時刻の秒です。
+
 ### MIDIコントローラーでparamsを動かす
 
 `project.json` の `ccMap` に `"レイヤー.param": { "cc": 1, "min": 0, "max": 1 }` を書くか、アプリの「MIDI」→「学習」で割り当てます。プレビュー中はコントローラーの値で動き、録音すると `source` に録音ファイルが入り、書き出しではその値を使います。スケッチからライブのMIDI入力は直接読めません(書き出しで結果が変わるため)。
@@ -194,7 +221,7 @@ Sketchbench のMCPサーバー(`sketchbench`)につながっていれば、人�
 | `create_work` / `add_sketch` | テンプレートから作品を作る、作品にスケッチとレイヤーを足す |
 | `render_frames` / `render_contact_sheet` | 描いた画像を返す(長辺1024pxのJPEG) |
 | `get_diagnostics` / `inspect_asset` | 診断、素材の中身(音声のBPM・ビート、MIDIのノートなど) |
-| `set_params` / `set_keyframes` / `set_layers` / `set_event_map` / `get_tracks` / `set_clips` | project.json を変える(直接書かずにこれを使う)。`set_keyframes` は params かクリップのフィールドのキーを丸ごと置き換える |
+| `set_params` / `set_keyframes` / `update_layer` / `set_layers` / `set_event_map` / `get_tracks` / `set_clips` | project.json を変える(直接書かずにこれを使う)。`set_keyframes` は params・クリップのフィールド・合成の値(`property`)のキーを丸ごと置き換え、`update_layer` はレイヤー1つの設定を部分的に変える |
 | `export` | MP4(音声付き)か連番PNGで書き出す |
 | `list_history` / `restore_history` | 履歴(git)の一覧と巻き戻し(その作品だけ) |
 | `get_ui_context` | 人がアプリで指し示しているもの(作品、フレーム、選んだクリップ、プレビュー上で Alt+ドラッグで囲んだ範囲)と画像 |

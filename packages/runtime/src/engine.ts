@@ -1,4 +1,4 @@
-// レイヤーの読み込み・setup・描画と、出力canvasへの合成。
+// レイヤーの読み込み・setup・描画と、出力canvasへの合成(合成は compositor.ts のWebGL2)。
 // コード変更時は dispose() してから新しいコードで setup() する。新しいコードが失敗したら直前の正常なコードで描き続ける。
 
 import { advanceTo } from "./clock.js";
@@ -8,6 +8,8 @@ import { createIsf, createRenderer, type Renderer } from "./renderers.js";
 import { loadAudio } from "./audio.js";
 import { makeTracks } from "./tracks.js";
 import { evaluate } from "./keyframes.js";
+import { Compositor } from "./compositor.js";
+import { bindTime, LayerClock, placement, TIME_ARGS, type LayerSettings } from "./layer.js";
 import { beatsFn, clearMidiCache, Events, fetchMidi, loadMidi, makeMarkers, MidiTrack, sectionFn, type MarkerInfo } from "./midi.js";
 
 export interface ProjectInfo {
@@ -22,6 +24,7 @@ export interface ProjectInfo {
   markers?: any[];
   bpm?: number;
   beatOffset?: number;
+  layers?: LayerSettings[];
 }
 
 /** project.json の ccMap: { "レイヤー.param": { cc, channel?, min?, max?, source? } } */
@@ -47,12 +50,17 @@ interface Loaded {
   types: Record<string, string>;
   tracks: Record<string, any>;
   failedAt: number;
+  /** レイヤー時刻と作品時刻の対応(setupで作った関数もこれを見る) */
+  clock: LayerClock;
+  settings: LayerSettings;
+  /** 内部解像度の倍率(変わったら作り直す) */
+  resolution: number;
 }
 
 export class Engine {
   project!: ProjectInfo;
   output: HTMLCanvasElement;
-  out2d: CanvasRenderingContext2D;
+  comp: Compositor | null = null;
   layers = new Map<string, Loaded>();
   order: string[] = [];
   host: HTMLElement;
@@ -70,7 +78,6 @@ export class Engine {
   constructor(host: HTMLElement) {
     this.host = host;
     this.output = document.createElement("canvas");
-    this.out2d = this.output.getContext("2d", { alpha: true })!;
     host.appendChild(this.output);
   }
 
@@ -89,8 +96,12 @@ export class Engine {
     const sizeChanged = !this.project || p.width !== this.project.width || p.height !== this.project.height;
     this.project = p;
     if (sizeChanged) {
-      this.output.width = p.width;
-      this.output.height = p.height;
+      // WebGLのコンテキストは大きさごとに作り直す(canvasごと替える)
+      this.comp?.dispose();
+      const c = document.createElement("canvas");
+      this.host.replaceChild(c, this.output);
+      this.output = c;
+      this.comp = new Compositor(c, p.width, p.height);
       for (const id of [...this.layers.keys()]) this.drop(id);
     }
     // イベント対応表・マーカー・BPM(作品時刻で引く関数)
@@ -127,15 +138,33 @@ export class Engine {
         ok = false;
         continue;
       }
-      if (cur && cur.url === info.url) {
+      const settings = this.settingsOf(info.id);
+      if (cur && cur.url === info.url && cur.resolution === resolutionOf(settings)) {
         ({ entries: cur.params, types: cur.types } = resolveParams(cur.def, info.params));
-        cur.tracks = makeTracks(cur.def.tracks, info.tracks, this.fps);
+        cur.settings = settings;
+        cur.clock.set(settings, this.fps, p.duration);
+        cur.tracks = this.bindTracks(makeTracks(cur.def.tracks, info.tracks, this.fps), cur.clock);
         continue;
       }
       ok = (await this.loadLayer(info, cur)) && ok;
     }
     this.lastFrame = -1;
     return ok;
+  }
+
+  private settingsOf(id: string): LayerSettings {
+    return this.project.layers?.find((l) => l.id === id) ?? { id };
+  }
+
+  private bindTracks(tracks: Record<string, any>, clock: LayerClock) {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(tracks)) out[k] = bindTime(v, TIME_ARGS.track, clock.toWork);
+    return out;
+  }
+
+  /** 合成結果をRGBA8(アルファで割った値、上の行から)で読む */
+  readPixels(into?: Uint8Array) {
+    return this.comp!.readPixels(into);
   }
 
   private drop(id: string) {
@@ -151,7 +180,11 @@ export class Engine {
   }
 
   private async loadLayer(info: LayerInfo, prev: Loaded | undefined): Promise<boolean> {
-    const { width: w, height: h } = this.project;
+    const settings = this.settingsOf(info.id);
+    const res = resolutionOf(settings);
+    const w = Math.max(1, Math.round(this.project.width * res)), h = Math.max(1, Math.round(this.project.height * res));
+    const clock = new LayerClock(this.fps);
+    clock.set(settings, this.fps, this.project.duration);
     try {
       let def: any;
       let renderer: Renderer;
@@ -172,12 +205,13 @@ export class Engine {
         if (!def || typeof def.draw !== "function") throw new Error(`${info.sketch}: default export に defineSketch({ draw }) がない`);
         const kind = def.renderer ?? "canvas2d";
         // rendererの種類が同じならcanvasとコンテキストを使い回す
-        renderer = prev && prev.renderer.kind === kind && kind !== "p5" ? prev.renderer : await createRenderer(kind, w, h, this.host);
+        const reuse = prev && prev.renderer.kind === kind && kind !== "p5" && prev.renderer.canvas.width === w && prev.renderer.canvas.height === h;
+        renderer = reuse ? prev!.renderer : await createRenderer(kind, w, h, this.host);
       }
       const { entries: params, types } = resolveParams(def, info.params);
       let state: unknown;
       try {
-        state = def.setup ? await def.setup({ width: w, height: h, p: evalParams(params, types, 0), assets: assetsApi(this.project), g: renderer.g, canvas: renderer.canvas }) : undefined;
+        state = def.setup ? await def.setup({ width: w, height: h, p: evalParams(params, types, 0), assets: assetsApi(this.project, clock), g: renderer.g, canvas: renderer.canvas }) : undefined;
       } catch (e) {
         if (!prev || prev.renderer !== renderer) renderer.dispose();
         throw e;
@@ -191,7 +225,7 @@ export class Engine {
         }
         if (prev.renderer !== renderer) prev.renderer.dispose();
       }
-      this.layers.set(info.id, { url: info.url!, def, renderer, state, params, types, tracks: makeTracks(def.tracks, info.tracks, this.fps), failedAt: -1 });
+      this.layers.set(info.id, { url: info.url!, def, renderer, state, params, types, tracks: this.bindTracks(makeTracks(def.tracks, info.tracks, this.fps), clock), failedAt: -1, clock, settings, resolution: res });
       post(`/declare?work=${encodeURIComponent(work)}&sketch=${encodeURIComponent(info.sketch)}`, JSON.stringify({
         mode: def.mode ?? "sequential", renderer: def.renderer ?? (info.kind === "isf" ? "shader" : "canvas2d"), params: declaredParams(def), tracks: def.tracks ?? null,
       })).catch(() => {});
@@ -217,28 +251,67 @@ export class Engine {
     return out;
   }
 
-  /** 1フレーム描いて出力canvasに合成する。 */
+  /**
+   * 1フレーム描いて合成する。先に全レイヤーのスケッチを下から順に描き(inputs.layer は自分より下のレイヤーだけ引ける)、
+   * そのあとで変形・不透明度・ブレンド・マットをかけて重ねる
+   */
   async render(frame: number) {
-    const t = frame / this.fps;
-    advanceTo(t * 1000);
+    const tw = frame / this.fps;
+    advanceTo(tw * 1000);
     const { width, height } = this.project;
-    this.out2d.clearRect(0, 0, width, height);
+    const drawn = new Map<string, HTMLCanvasElement>();
     for (const id of this.order) {
       const l = this.layers.get(id);
-      if (!l) continue;
-      seed(this.project.seed ?? 0, frame);
-      const p = this.paramsAt(id, evalParams(l.params, l.types, frame), t);
+      if (!l || !l.clock.active(frame)) continue;
+      const lf = l.clock.layerFrame(frame);
+      const lframe = Math.floor(lf + 1e-9);
+      const t = lf / this.fps;
+      seed(this.project.seed ?? 0, lframe);
+      const p = this.paramsAt(id, evalParams(l.params, l.types, lf), tw);
+      const toWork = l.clock.toWork;
+      const inputs = {
+        layer: (name: string): HTMLCanvasElement | null => {
+          const c = drawn.get(name);
+          if (!c && !this.warned.has(`${id}>${name}`)) {
+            this.warned.add(`${id}>${name}`);
+            log("warn", `レイヤー ${id}: inputs.layer("${name}") を引けない(自分より下にあり、今のフレームで出ているレイヤーだけ引ける)`);
+          }
+          return c ?? null;
+        },
+      };
+      const ctx = {
+        g: l.renderer.g, t, frame: lframe, width: l.renderer.canvas.width, height: l.renderer.canvas.height, p, rand, canvas: l.renderer.canvas,
+        events: bindTime(this.events, TIME_ARGS.events, toWork), section: (name: string, x: number) => this.section(name, toWork(x)), beats: (x: number) => this.beats(toWork(x)),
+        markers: this.markers, tracks: l.tracks, inputs,
+      };
       try {
-        await l.renderer.frame(() => l.def.draw({ g: l.renderer.g, t, frame, width, height, p, rand, canvas: l.renderer.canvas, events: this.events, section: this.section, beats: this.beats, markers: this.markers, tracks: l.tracks }, l.state));
+        await l.renderer.frame(() => l.def.draw(ctx, l.state));
         l.failedAt = -1;
       } catch (e) {
         if (l.failedAt < 0) log("error", `draw で例外(frame ${frame}): ${errorText(e)}`);
         l.failedAt = frame;
       }
-      this.out2d.drawImage(l.renderer.canvas, 0, 0, width, height);
+      drawn.set(id, l.renderer.canvas);
     }
+    const comp = this.comp!;
+    comp.begin();
+    const matteSources = new Set(this.order.map((id) => this.layers.get(id)?.settings.matte?.layer).filter(Boolean) as string[]);
+    const place = (id: string) => {
+      const l = this.layers.get(id)!;
+      return { source: drawn.get(id)!, ...placement(l.settings, l.clock.layerFrame(frame), width, height) };
+    };
+    for (const id of this.order) {
+      const l = this.layers.get(id);
+      if (!l || !drawn.has(id) || l.settings.visible === false || matteSources.has(id)) continue;
+      const m = l.settings.matte;
+      const matte = m ? { placed: drawn.has(m.layer) && this.layers.has(m.layer) ? place(m.layer) : null, mode: m.mode ?? "alpha" } : undefined;
+      comp.layer(place(id), l.settings.blend ?? "normal", matte);
+    }
+    comp.finish();
     this.lastFrame = frame;
   }
+
+  private warned = new Set<string>();
 }
 
 /** 変換エラー。スタックは要らないので message だけを持つ */
@@ -292,8 +365,13 @@ function evalParams(entries: Record<string, any>, types: Record<string, string>,
   return out;
 }
 
-/** フェーズ1のassetsは作品フォルダのファイルを読むだけ。音声・MIDIの解析はフェーズ2。 */
-function assetsApi(project: ProjectInfo) {
+function resolutionOf(s: LayerSettings): number {
+  const r = Number(s.resolution ?? 1);
+  return Number.isFinite(r) ? Math.max(0.1, Math.min(1, r)) : 1;
+}
+
+/** setupに渡す assets。音声とMIDIはレイヤー時刻で引けるように包む */
+function assetsApi(project: ProjectInfo, clock: LayerClock) {
   const url = (rel: string) => `/work/${encodeURIComponent(work)}/files/assets/${rel}`;
   return {
     url,
@@ -313,11 +391,11 @@ function assetsApi(project: ProjectInfo) {
     async audio(rel: string) {
       const entry = (project.audio ?? []).find((a) => a.asset.replace(/^\.\//, "") === `assets/${rel}`);
       const offsetSec = entry ? (entry.offset ?? 0) * project.fps[1] / project.fps[0] : 0;
-      return loadAudio(work, rel, offsetSec);
+      return bindTime(await loadAudio(work, rel, offsetSec), TIME_ARGS.audio, clock.toWork);
     },
     /** MIDIファイル。offset は秒(作品時刻でのファイルの先頭) */
     async midi(rel: string, opts: { offset?: number } = {}) {
-      return loadMidi(work, rel, opts.offset ?? 0);
+      return bindTime(await loadMidi(work, rel, opts.offset ?? 0), TIME_ARGS.midi, clock.toWork);
     },
     async font(family: string, rel: string) {
       const f = new FontFace(family, `url(${url(rel)})`);

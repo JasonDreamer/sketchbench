@@ -85,6 +85,46 @@ fn layer_schema(decl: &Value) -> Value {
     })
 }
 
+/// レイヤー1つの形(合成の設定)。params と tracks の中身はスケッチの宣言で別に縛る
+fn layer_item_schema() -> Value {
+    let num = json!({ "type": "number" });
+    let v2 = type_schema("vec2");
+    let either = |ts: &Value| json!({ "oneOf": [ ts.clone(), keyed_schema(ts) ] });
+    json!({
+        "type": "object",
+        "required": ["id", "sketch"],
+        "properties": {
+            "id": { "type": "string" },
+            "sketch": { "type": "string" },
+            "params": { "type": "object" },
+            "tracks": { "type": "object" },
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 1 },
+            "offset": { "type": "number" },
+            "speed": { "type": "number", "not": { "const": 0 } },
+            "blend": { "enum": ["normal", "add", "multiply", "screen", "difference"] },
+            "opacity": either(&json!({ "type": "number", "minimum": 0, "maximum": 1 })),
+            "transform": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "position": either(&v2),
+                    "scale": { "oneOf": [ num.clone(), v2.clone(), keyed_schema(&num), keyed_schema(&v2) ] },
+                    "rotation": either(&num),
+                    "anchor": either(&v2),
+                },
+            },
+            "matte": {
+                "type": "object",
+                "required": ["layer"],
+                "properties": { "layer": { "type": "string" }, "mode": { "enum": ["alpha", "alphaInverted", "luma", "lumaInverted"] } },
+            },
+            "resolution": { "type": "number", "minimum": 0.1, "maximum": 1 },
+            "visible": { "type": "boolean" },
+        },
+    })
+}
+
 fn project_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -105,7 +145,7 @@ fn project_schema() -> Value {
             "ccMap": { "type": "object", "additionalProperties": { "type": "object", "required": ["cc"], "properties": { "cc": { "type": "integer", "minimum": 0, "maximum": 127 }, "channel": { "type": "integer" }, "min": { "type": "number" }, "max": { "type": "number" }, "source": { "type": "string" } } } },
             "layers": {
                 "type": "array",
-                "items": { "type": "object", "required": ["id", "sketch"], "properties": { "id": { "type": "string" }, "sketch": { "type": "string" }, "params": { "type": "object" }, "tracks": { "type": "object" } } },
+                "items": layer_item_schema(),
             },
         },
     })
@@ -131,6 +171,17 @@ pub fn validate(dir: &Path) -> Value {
     };
     let ps = project_schema();
     check(&ps, &v, "", &mut errors);
+    // マットが指すレイヤーがあるか
+    let ids: Vec<&str> = v["layers"].as_array().into_iter().flatten().filter_map(|l| l["id"].as_str()).collect();
+    for (i, l) in v["layers"].as_array().into_iter().flatten().enumerate() {
+        if let Some(m) = l["matte"]["layer"].as_str() {
+            if m == l["id"].as_str().unwrap_or("") {
+                errors.push(format!("/layers/{i}/matte/layer: 自分自身はマットにできない"));
+            } else if !ids.contains(&m) {
+                errors.push(format!("/layers/{i}/matte/layer: レイヤー {m} がない"));
+            }
+        }
+    }
     let decls = crate::read_declarations(dir);
     let mut per_layer = serde_json::Map::new();
     for (i, l) in v["layers"].as_array().into_iter().flatten().enumerate() {
