@@ -12,7 +12,7 @@ onError((e) => log("error", `タイマー/rAFのコールバックで例外: ${e
 const engine = new Engine(document.getElementById("stage")!);
 
 async function preview() {
-  type TimeMsg = { frame: number; playing: boolean; fps: number; duration: number; unixMs: number };
+  type TimeMsg = { frame: number; playing: boolean; fps: number; duration: number; unixMs: number; loopStart?: number; loopEnd?: number };
   let time: TimeMsg = { frame: 0, playing: false, fps: 30, duration: 300, unixMs: real.unixMs() };
   let dirty = true;
   let busy = false;
@@ -92,6 +92,9 @@ async function preview() {
       if (time.playing) f += ((real.unixMs() - time.unixMs) / 1000) * time.fps;
       const dur = engine.project?.duration ?? time.duration;
       let frame = Math.floor(f + 1e-6);
+      const ls = time.loopStart, le = time.loopEnd;
+      // 再生中はループ範囲(なければ尺全体)で折り返す。Rustの時計と同じ規則
+      if (time.playing && ls != null && le != null && le > ls && frame >= le) frame = ls + ((frame - ls) % (le - ls));
       if (dur > 0) frame = ((frame % dur) + dur) % dur;
       if (frame !== engine.lastFrame || dirty) {
         dirty = false;
@@ -152,8 +155,10 @@ async function exportJob() {
       await post(`/export/ready?job=${job}`);
       const maxSize = Number(query.get("maxSize") ?? 1024);
       const scale = Math.min(1, maxSize / Math.max(width, height));
+      // img=png は劣化させない(継ぎ目の差分を取るときなど)
+      const png = query.get("img") === "png";
       const jpeg = async (c: OffscreenCanvas) => {
-        const b = await withRealTimers(() => c.convertToBlob({ type: "image/jpeg", quality: 0.85 }));
+        const b = await withRealTimers(() => c.convertToBlob(png ? { type: "image/png" } : { type: "image/jpeg", quality: 0.85 }));
         return new Uint8Array(await b.arrayBuffer());
       };
       if (format === "frames") {

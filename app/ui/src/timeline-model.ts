@@ -7,6 +7,8 @@ export interface ProjectLike {
   bpm?: number;
   beatOffset?: number;
   markers?: { name: string; start: number; end?: number }[];
+  /** ループ範囲 [start, end) */
+  loop?: { start: number; end: number };
   audio?: { asset: string; offset?: number }[];
   eventMap?: Record<string, any>;
   width?: number;
@@ -156,4 +158,35 @@ export function timecode(frame: number, p: ProjectLike): string {
   const s = frame / fps;
   const m = Math.floor(s / 60);
   return `${m}:${(s - m * 60).toFixed(2).padStart(5, "0")}`;
+}
+
+/** 時刻の表示のしかた(上部のバーの表示をクリックで切り替える) */
+export type TimeDisplay = "frames" | "timecode" | "timecodeNdf" | "seconds";
+
+/** NTSC系(29.97・59.94)のfpsか。ドロップフレームを選べる */
+export function isNtsc(fps: [number, number]): boolean {
+  const f = fps[0] / fps[1];
+  return Math.abs(f - 30000 / 1001) < 1e-6 || Math.abs(f - 60000 / 1001) < 1e-6;
+}
+
+/**
+ * SMPTEタイムコード(HH:MM:SS:FF)。dropFrame で29.97は1分ごとに2フレーム、59.94は4フレームの番号を飛ばす
+ * (10分ごとの分は飛ばさない)。ドロップフレームは区切りの最後を ; にする
+ */
+export function smpte(frame: number, fps: [number, number], dropFrame: boolean): string {
+  const nominal = Math.round(fps[0] / fps[1]);
+  let f = Math.max(0, Math.floor(frame));
+  const df = dropFrame && isNtsc(fps);
+  if (df) {
+    const drop = nominal === 30 ? 2 : 4;
+    const perMin = nominal * 60 - drop;
+    const per10 = nominal * 600 - drop * 9;
+    const d = Math.floor(f / per10);
+    const m = f % per10;
+    f += drop * 9 * d + (m > drop ? drop * Math.floor((m - drop) / perMin) : 0);
+  }
+  const ff = f % nominal;
+  const s = Math.floor(f / nominal);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}${df ? ";" : ":"}${pad(ff)}`;
 }

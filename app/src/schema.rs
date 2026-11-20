@@ -139,6 +139,7 @@ fn project_schema() -> Value {
             "seed": { "type": "integer" },
             "bpm": { "type": "number", "exclusiveMinimum": 0 },
             "beatOffset": { "type": "integer" },
+            "loop": { "type": "object", "required": ["start", "end"], "properties": { "start": { "type": "integer", "minimum": 0 }, "end": { "type": "integer", "minimum": 1 } } },
             "audio": { "type": "array", "items": { "type": "object", "required": ["asset"], "properties": { "asset": { "type": "string" }, "offset": { "type": "integer" }, "gain": { "type": "number" } } } },
             "markers": { "type": "array", "items": { "type": "object", "required": ["name", "start"], "properties": { "name": { "type": "string" }, "start": { "type": "integer" }, "end": { "type": "integer" } } } },
             "eventMap": { "type": "object", "additionalProperties": { "type": "object" } },

@@ -2,11 +2,12 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Timeline, type Selection, type TimelineApi } from "./Timeline";
-import type { ProjectLike } from "./timeline-model";
+import { isNtsc, smpte, type ProjectLike, type TimeDisplay } from "./timeline-model";
+import { SeamView } from "./SeamView";
 import { ParamPanel, type ParamApi } from "./ParamPanel";
 import { ExportForm, QueueList, type QueueItem } from "./ExportUi";
 
-type TimeMsg = { frame: number; playing: boolean; fps: number; duration: number; unixMs: number; audio?: boolean };
+type TimeMsg = { frame: number; playing: boolean; fps: number; fpsRatio?: [number, number]; duration: number; unixMs: number; audio?: boolean; loopStart?: number; loopEnd?: number };
 type Log = { source: string; level: string; message: string; unixMs: number };
 type ExportMsg = { id: string; state: "running" | "done" | "failed"; done?: number; total?: number; path?: string; error?: string; elapsed?: number };
 type KeyMsg = { code: string; key: string; shift: boolean; ctrl: boolean; alt?: boolean };
@@ -109,8 +110,55 @@ export function App() {
     const t = time();
     now();
     let f = t.frame + (t.playing ? ((Date.now() - t.unixMs) / 1000) * t.fps : 0);
+    // 再生中はループ範囲(なければ尺全体)で折り返す。Rustの時計と同じ規則
+    if (t.playing && t.loopStart != null && t.loopEnd != null && t.loopEnd > t.loopStart && f >= t.loopEnd) f = t.loopStart + ((f - t.loopStart) % (t.loopEnd - t.loopStart));
     if (t.duration > 0) f = ((f % t.duration) + t.duration) % t.duration;
     return Math.floor(f + 1e-6);
+  };
+
+  /** 時刻の表示(クリックで フレーム → タイムコード →(NTSC系なら)ドロップしないタイムコード → 秒) */
+  const [display, setDisplay] = createSignal<TimeDisplay>(((): TimeDisplay => {
+    try {
+      return (localStorage.getItem("timeDisplay") as TimeDisplay) || "frames";
+    } catch {
+      return "frames";
+    }
+  })());
+  const fpsRatio = (): [number, number] => (project()?.fps as [number, number]) ?? time().fpsRatio ?? [30, 1];
+  const nextDisplay = () => {
+    const order: TimeDisplay[] = isNtsc(fpsRatio()) ? ["frames", "timecode", "timecodeNdf", "seconds"] : ["frames", "timecode", "seconds"];
+    const n = order[(order.indexOf(display()) + 1) % order.length] ?? "frames";
+    setDisplay(n);
+    try {
+      localStorage.setItem("timeDisplay", n);
+    } catch {}
+  };
+  const showTime = (f: number) => {
+    const d = display();
+    if (d === "timecode") return smpte(f, fpsRatio(), true);
+    if (d === "timecodeNdf") return smpte(f, fpsRatio(), false);
+    if (d === "seconds") return fmtTime(f);
+    return String(f);
+  };
+  const displayName = () => ({ frames: "フレーム", timecode: isNtsc(fpsRatio()) ? "タイムコード(ドロップフレーム)" : "タイムコード", timecodeNdf: "タイムコード(ノンドロップ)", seconds: "秒" })[display()];
+  let seamDialog!: HTMLDialogElement;
+  const [seamOpen, setSeamOpen] = createSignal(false);
+  const openSeam = () => {
+    setSeamOpen(true);
+    openDialog(seamDialog);
+    seamDialog.addEventListener("close", () => setSeamOpen(false), { once: true });
+  };
+  /** ループ範囲を打つ(B: 開始、N: 終了。AEの作業範囲と同じキー) */
+  const setLoopAt = (which: "start" | "end") => {
+    const f = currentFrame();
+    const p = project();
+    if (!p) return;
+    const cur = (p as any).loop as { start: number; end: number } | undefined;
+    let start = cur?.start ?? 0, end = cur?.end ?? p.duration;
+    if (which === "start") start = f;
+    else end = f + 1;
+    if (end <= start) which === "start" ? (end = p.duration) : (start = 0);
+    edit({ op: "setLoop", start, end });
   };
 
   const reportRect = () => {
@@ -196,6 +244,8 @@ export function App() {
       } else if (k.code === "Space" || k.key === " ") togglePlay();
       else if (k.key === "ArrowLeft" || k.key === "ArrowRight") seek(currentFrame() + (k.key === "ArrowLeft" ? -1 : 1) * (k.shift ? 10 : 1), true);
       else if (k.key === "Home") seek(0);
+      else if ((k.key === "b" || k.key === "B") && !k.ctrl) setLoopAt("start");
+      else if ((k.key === "n" || k.key === "N") && !k.ctrl) setLoopAt("end");
       else return false;
       return true;
     };
@@ -367,8 +417,18 @@ export function App() {
           {time().playing ? "一時停止" : "再生"}
         </button>
         <span class="time">
-          <b>{currentFrame()}</b> / {time().duration} f ・ {fmtTime(currentFrame())} ・ {time().fps.toFixed(3).replace(/\.?0+$/, "")} fps
+          <button class="tc" onClick={nextDisplay} title={`表示: ${displayName()}(クリックで切り替え)`}>{showTime(currentFrame())}</button>
+          {" "}/ {showTime(time().duration)} ・ {time().fps.toFixed(3).replace(/\.?0+$/, "")} fps
         </span>
+        <Show when={(project() as any)?.loop}>
+          {(l) => (
+            <span class="loop-chip" title="ループ範囲(B で開始、N で終了を再生ヘッドに)">
+              ループ {showTime(l().start)}〜{showTime(l().end)}
+              <button onClick={openSeam} title="ループの最後と最初のフレームのつながりを見る">継ぎ目</button>
+              <button onClick={() => edit({ op: "setLoop", start: null, end: null })} aria-label="ループ範囲を外す">✕</button>
+            </span>
+          )}
+        </Show>
         <Show when={project()}>
           {(p) => (
             <label class="tempo">BPM
@@ -415,7 +475,7 @@ export function App() {
               api={(a) => (timeline = a)}
             />
           </Show>
-          <div class="status" aria-live="polite">{status() || "クリック: シーク / ダブルクリック: クリップやマーカーを追加 / ドラッグ: 移動・伸縮(Shiftで吸着なし) / S: 分割 / Delete: 削除 / Ctrl+Z: 取り消し / ホイール: 拡大縮小"}</div>
+          <div class="status" aria-live="polite">{status() || "クリック: シーク / ダブルクリック: クリップやマーカーを追加 / ドラッグ: 移動・伸縮(Shiftで吸着なし) / S: 分割 / Delete: 削除 / B・N: ループの開始・終了 / Ctrl+Z: 取り消し / ホイール: 拡大縮小"}</div>
         </div>
         <div class="side">
           <Show when={project()}>
@@ -516,6 +576,11 @@ export function App() {
       </dialog>
       <dialog ref={queueDialog}>
         <QueueList items={queue()} progress={progress()} close={() => queueDialog.close()} fail={fail} />
+      </dialog>
+      <dialog ref={seamDialog}>
+        <Show when={seamOpen() && (project() as any)?.loop}>
+          {(l) => <SeamView start={l().start} end={l().end} label={showTime} close={() => seamDialog.close()} />}
+        </Show>
       </dialog>
       <dialog ref={layerDialog}>
         <form onSubmit={(ev) => { ev.preventDefault(); const fd = new FormData(ev.currentTarget); layerDialog.close(); edit({ op: "addLayer", sketch: String(fd.get("sketch")) }); }}>

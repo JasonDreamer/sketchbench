@@ -217,6 +217,14 @@ pub struct SetLayersArg {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SetLoopArg {
+    pub work: String,
+    /// ループ範囲の開始と終了(作品のフレーム、[start, end))。両方省略で外す
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct UpdateLayerArg {
     pub work: String,
     pub layer: String,
@@ -539,6 +547,14 @@ impl Tools {
     #[tool(description = "レイヤー1つの設定(時間・不透明度・ブレンド・変形・マット・内部解像度)を部分的に変える")]
     async fn update_layer(&self, Parameters(a): Parameters<UpdateLayerArg>) -> Result<CallToolResult, ErrorData> {
         match self.apply(&a.work, edit::Op::UpdateLayer { layer: a.layer, set: a.set }) {
+            Ok(_) => ok_json(json!({ "ok": true })),
+            Err(e) => fail(e),
+        }
+    }
+
+    #[tool(description = "ループ範囲(プレビューの繰り返し再生と、書き出しの範囲に使える)を決める")]
+    async fn set_loop(&self, Parameters(a): Parameters<SetLoopArg>) -> Result<CallToolResult, ErrorData> {
+        match self.apply(&a.work, edit::Op::SetLoop { start: a.start, end: a.end }) {
             Ok(_) => ok_json(json!({ "ok": true })),
             Err(e) => fail(e),
         }

@@ -130,6 +130,20 @@ async fn start_export(app: AppHandle, options: export::ExportOptions) -> CmdResu
     export::start(&core(&app), options)
 }
 
+/// 開いている作品のフレームを書き出し用のWebViewで描き、PNG(base64)で返す(ループの継ぎ目の確認など)
+#[tauri::command]
+async fn render_stills(app: AppHandle, frames: Vec<u64>, max_size: Option<u32>) -> CmdResult {
+    use base64::Engine as _;
+    let c = core(&app);
+    let work = c.work.lock().unwrap().clone().ok_or("作品を開いていない")?;
+    let o = export::run(&c, export::ExportOptions { work, format: "frames".into(), frames: Some(frames), max_size, image_format: Some("png".into()), ..Default::default() }).await;
+    if !o.ok {
+        return Err(o.error.unwrap_or_default());
+    }
+    let images: Vec<Value> = o.images.iter().map(|(f, b)| serde_json::json!({ "frame": f, "png": base64::engine::general_purpose::STANDARD.encode(b) })).collect();
+    Ok(serde_json::json!({ "images": images }))
+}
+
 /// レンダーキューに積む(複数の仕様をまとめて積める)
 #[tauri::command]
 fn queue_add(app: AppHandle, items: Vec<export::ExportOptions>) -> CmdResult {
@@ -315,6 +329,7 @@ fn main() {
             queue_cancel,
             queue_clear,
             measure_loudness,
+            render_stills,
             edit_project,
             undo,
             redo,

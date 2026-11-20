@@ -148,7 +148,7 @@ impl Core {
         let dir = workspace::work_dir(&self.ws, work).ok_or(format!("作品 {work} がない"))?;
         let project = workspace::read_project(&dir)?;
         self.clock.play(false);
-        self.clock.configure(project.fps, project.duration);
+        self.clock.configure(project.fps, project.duration, workspace::loop_range(&project));
         self.clock.seek(0.0);
         *self.work.lock().unwrap() = Some(work.to_string());
         self.editor.clear();
@@ -213,7 +213,7 @@ impl Core {
                         continue;
                     }
                     if let Ok(p) = workspace::read_project(&dir) {
-                        me.clock.configure(p.fps, p.duration);
+                        me.clock.configure(p.fps, p.duration, workspace::loop_range(&p));
                     }
                 }
                 // 音声の割り当てや素材が変わったらミックスを作り直す

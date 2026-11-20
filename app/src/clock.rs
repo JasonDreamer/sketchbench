@@ -22,6 +22,9 @@ pub struct TimeMsg {
     pub unix_ms: f64,
     /// 音声が時刻を駆動しているか
     pub audio: bool,
+    /// ループ範囲 [start, end)(project.json の loop)。なければ尺全体
+    pub loop_start: Option<u64>,
+    pub loop_end: Option<u64>,
 }
 
 struct State {
@@ -30,6 +33,7 @@ struct State {
     anchor_frame: f64,
     fps: [u32; 2],
     duration: u64,
+    looped: Option<(u64, u64)>,
 }
 
 pub struct Clock {
@@ -44,7 +48,7 @@ pub fn unix_ms() -> f64 {
 impl Default for Clock {
     fn default() -> Self {
         Clock {
-            s: Mutex::new(State { playing: false, anchor: Instant::now(), anchor_frame: 0.0, fps: [30, 1], duration: 300 }),
+            s: Mutex::new(State { playing: false, anchor: Instant::now(), anchor_frame: 0.0, fps: [30, 1], duration: 300, looped: None }),
             player: Mutex::new(None),
         }
     }
@@ -71,11 +75,7 @@ impl Clock {
             Some(p) => p.position_secs() * fps_f(s.fps),
             None => s.anchor_frame + s.anchor.elapsed().as_secs_f64() * fps_f(s.fps),
         };
-        if s.duration > 0 {
-            f % s.duration as f64
-        } else {
-            f
-        }
+        wrap(s, f)
     }
 
     pub fn msg(&self) -> TimeMsg {
@@ -88,21 +88,30 @@ impl Clock {
             duration: s.duration,
             unix_ms: unix_ms(),
             audio: self.audio().is_some(),
+            loop_start: s.looped.map(|l| l.0),
+            loop_end: s.looped.map(|l| l.1),
         }
     }
 
-    pub fn configure(&self, fps: [u32; 2], duration: u64) {
+    pub fn configure(&self, fps: [u32; 2], duration: u64, looped: Option<(u64, u64)>) {
         let mut s = self.s.lock().unwrap();
         let f = self.frame_of(&s);
         s.fps = fps;
         s.duration = duration;
+        s.looped = looped.filter(|(a, b)| a < b && *b <= duration);
         s.anchor = Instant::now();
         s.anchor_frame = if duration > 0 { f.min(duration as f64 - 1.0).max(0.0) } else { f };
     }
 
     pub fn play(&self, playing: bool) {
         let mut s = self.s.lock().unwrap();
-        let f = self.frame_of(&s);
+        let mut f = self.frame_of(&s);
+        // ループ範囲の外から再生を始めたら、範囲の先頭から(AEの作業範囲と同じ)
+        if let (true, Some((a, b))) = (playing, s.looped) {
+            if f < a as f64 || f >= b as f64 {
+                f = a as f64;
+            }
+        }
         s.anchor = Instant::now();
         s.anchor_frame = f;
         s.playing = playing;
@@ -122,16 +131,26 @@ impl Clock {
         }
     }
 
-    /// 音声が尺の終わりを越えたら先頭へ戻す(ループ再生)。時刻の配信ループから呼ぶ
+    /// 音声が尺(またはループ範囲)の終わりを越えたら先頭へ戻す(ループ再生)。時刻の配信ループから呼ぶ
     pub fn wrap_audio(&self) {
         let s = self.s.lock().unwrap();
         if !s.playing || s.duration == 0 {
             return;
         }
+        let (a, b) = s.looped.unwrap_or((0, s.duration));
         if let Some(p) = self.audio() {
-            if p.position_secs() * fps_f(s.fps) >= s.duration as f64 {
-                p.seek_secs(0.0);
+            if p.position_secs() * fps_f(s.fps) >= b as f64 {
+                p.seek_secs(a as f64 / fps_f(s.fps));
             }
         }
+    }
+}
+
+/// 再生中の位置を、ループ範囲(なければ尺全体)の中へ折り返す
+fn wrap(s: &State, f: f64) -> f64 {
+    match s.looped {
+        Some((a, b)) if f >= b as f64 => a as f64 + (f - a as f64) % (b - a) as f64,
+        _ if s.duration > 0 => f % s.duration as f64,
+        _ => f,
     }
 }

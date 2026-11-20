@@ -48,6 +48,9 @@ pub enum Op {
     /// キーフレームを丸ごと置き換える(MCPの set_keyframes)。空にすると value だけが残る
     #[serde(rename_all = "camelCase")]
     SetKeys { target: KeyTarget, keys: Vec<Value> },
+    /// ループ範囲を決める(両方 null で外す)
+    #[serde(rename_all = "camelCase")]
+    SetLoop { start: Option<u64>, end: Option<u64> },
     /// レイヤーの設定を部分的に変える(値が null のキーは消す)。id と sketch は変えられない
     #[serde(rename_all = "camelCase")]
     UpdateLayer { layer: String, set: Map<String, Value> },
@@ -155,6 +158,8 @@ impl Op {
             Op::SetLayers { layers } => format!("レイヤー構成を{}個に置き換え", layers.len()),
             Op::UpdateLayer { layer, set } => format!("{layer} の{}を変更", set.keys().map(|k| k.as_str()).collect::<Vec<_>>().join("・")),
             Op::MoveLayer { layer, .. } => format!("{layer} の重ね順を変更"),
+            Op::SetLoop { start: None, end: None } => "ループ範囲を外す".into(),
+            Op::SetLoop { .. } => "ループ範囲を変更".into(),
             Op::DeleteLayer { layer } => format!("{layer} を削除"),
             Op::SetClips { add, update, delete, replace, .. } => format!("クリップを変更(追加{} 変更{} 削除{}{})", add.len(), update.len(), delete.len(), if *replace { "、全置換" } else { "" }),
         }
@@ -350,6 +355,23 @@ impl Editor {
                     } else {
                         l.insert(k, val);
                     }
+                }
+            }
+            Op::SetLoop { start, end } => {
+                let dur = v["duration"].as_u64().unwrap_or(0);
+                let cur = v.get("loop").cloned().unwrap_or(Value::Null);
+                if start.is_none() && end.is_none() {
+                    if let Some(o) = v.as_object_mut() {
+                        o.remove("loop");
+                    }
+                } else {
+                    // 片方だけ指定したら、もう片方は今の値(なければ先頭か尺の終わり)
+                    let a = start.or(cur["start"].as_u64()).unwrap_or(0);
+                    let b = end.or(cur["end"].as_u64()).unwrap_or(dur);
+                    if a >= b || b > dur {
+                        return Err(format!("ループ範囲は 0 ≦ 開始 < 終了 ≦ 尺({dur}) にする"));
+                    }
+                    v["loop"] = json!({ "start": a, "end": b });
                 }
             }
             Op::MoveLayer { layer, to } => {

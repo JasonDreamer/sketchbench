@@ -57,6 +57,9 @@ pub struct ExportOptions {
     /// ファイル名の末尾に付ける名前(複数仕様の書き出しで区別する。英数字・-・_)
     #[serde(default)]
     pub name: Option<String>,
+    /// frames の画像の形式 "jpeg"(既定)か "png"(差分を取るときなど、劣化させたくないとき)
+    #[serde(default)]
+    pub image_format: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -225,6 +228,9 @@ pub fn start(core: &Arc<Core>, opt: ExportOptions) -> Result<Value, String> {
     }
     if opt.format == "frames" || opt.format == "sheet" {
         extra_q.push_str(&format!("&maxSize={}", opt.max_size.unwrap_or(1024).clamp(64, 4096)));
+        if opt.image_format.as_deref() == Some("png") {
+            extra_q.push_str("&img=png");
+        }
     }
     let id = format!("job{}", core.next_id());
     let label = format!("export-{id}");

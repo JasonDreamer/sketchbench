@@ -298,6 +298,16 @@ export function Timeline(props: Props) {
         }
       }
     }
+    // ループ範囲(ルーラーに帯、範囲の外を少し暗く)
+    const lp = proj.loop;
+    if (lp) {
+      const a = Math.max(v.gutter, xOf(v, lp.start)), b = xOf(v, lp.end);
+      g.fillStyle = "rgba(150,156,170,0.25)";
+      if (b > a) g.fillRect(a, 2, b - a, gridTop - 6);
+      g.fillStyle = "rgba(0,0,0,0.25)";
+      if (a > v.gutter) g.fillRect(v.gutter, gridTop, a - v.gutter, h - gridTop);
+      if (b < w) g.fillRect(Math.max(v.gutter, b), gridTop, w - Math.max(v.gutter, b), h - gridTop);
+    }
     // プレビューキャッシュの揃っている区間(ルーラーの下端)
     g.fillStyle = COLORS.event;
     for (const [a, b] of props.cached()) {

@@ -39,7 +39,10 @@ export function ExportForm(props: { work: string; project: ProjectLike; close: (
     // 範囲
     let from: number | undefined, to: number | undefined;
     const range = String(fd.get("range"));
-    if (range.startsWith("m:")) {
+    if (range === "loop" && p().loop) {
+      from = p().loop!.start;
+      to = p().loop!.end;
+    } else if (range.startsWith("m:")) {
       const m = (p().markers ?? [])[Number(range.slice(2))];
       from = m.start;
       to = m.end ?? p().duration;
@@ -87,6 +90,7 @@ export function ExportForm(props: { work: string; project: ProjectLike; close: (
       <label>範囲
         <select name="range">
           <option value="all">全体(0〜{p().duration} f)</option>
+          <Show when={p().loop}>{(l) => <option value="loop" selected>ループ範囲({l().start}〜{l().end} f)</option>}</Show>
           <For each={p().markers ?? []}>{(m, i) => <option value={`m:${i()}`}>マーカー {m.name}({m.start}〜{m.end ?? p().duration} f)</option>}</For>
           <option value="custom">指定する</option>
         </select>

@@ -242,6 +242,12 @@ pub fn add_sketch(ws: &Path, work_dir: &Path, template: &str, name: &str) -> Res
 
 /// スケッチを読み直すかどうかの版。project.json・.cache・renders・.git 以外のファイルの名前・大きさ・更新時刻から作る
 /// (params や合成の設定を変えただけでは変わらないので、スケッチの setup をやり直さずに済む)
+/// project.json の loop(ループ範囲 [start, end))
+pub fn loop_range(p: &Project) -> Option<(u64, u64)> {
+    let l = p.rest.get("loop")?;
+    Some((l["start"].as_u64()?, l["end"].as_u64()?))
+}
+
 pub fn code_version(work_dir: &Path) -> String {
     let mut h = blake3::Hasher::new();
     for f in walk(work_dir) {
