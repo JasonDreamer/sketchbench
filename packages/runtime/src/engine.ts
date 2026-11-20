@@ -9,6 +9,7 @@ import { loadAudio } from "./audio.js";
 import { makeTracks } from "./tracks.js";
 import { evaluate } from "./keyframes.js";
 import { Compositor, type AlphaMode } from "./compositor.js";
+import { FrameCache, hashText } from "./cache.js";
 import { bindTime, LayerClock, placement, TIME_ARGS, type LayerSettings } from "./layer.js";
 import { beatsFn, clearMidiCache, Events, fetchMidi, loadMidi, makeMarkers, MidiTrack, sectionFn, type MarkerInfo } from "./midi.js";
 
@@ -55,6 +56,12 @@ interface Loaded {
   settings: LayerSettings;
   /** 内部解像度の倍率(変わったら作り直す) */
   resolution: number;
+  /** 読み込むたびに増える番号(キャッシュのキーに入れる) */
+  gen: number;
+  /** 描いてみて分かったこと: tracks の all() を使う、inputs.layer を使う(キャッシュのしかたが変わる) */
+  flags: { allTracks: boolean; usesInputs: boolean };
+  /** tracks の中身全体のハッシュ(all() を使うスケッチのキー) */
+  tracksHash: string;
 }
 
 export class Engine {
@@ -63,6 +70,16 @@ export class Engine {
   comp: Compositor | null = null;
   /** 書き出しで出力の大きさを変えるとき(16:9 と 9:16 など)。project.json の width・height の代わりに使う */
   sizeOverride: { width: number; height: number } | null = null;
+  /** プレビューキャッシュ(プレビューのときだけ。書き出しでは null) */
+  cache: FrameCache | null = null;
+  private cacheBudget = 0;
+  /** ほかのレイヤーの inputs.layer で引かれるレイヤー(毎回描く) */
+  private inputSources = new Set<string>();
+  /** キャッシュから出したレイヤーを inputs.layer で引かれたので、描き直しが要る */
+  needsRedraw = false;
+  private gen = 0;
+  /** 作品全体の設定(イベント・マーカー・BPM・音声・シード・大きさ)のハッシュ。変わったらキャッシュを全部捨てる */
+  private globalKey = "";
   layers = new Map<string, Loaded>();
   order: string[] = [];
   host: HTMLElement;
@@ -87,6 +104,12 @@ export class Engine {
     return this.project.fps[0] / Math.max(1, this.project.fps[1]);
   }
 
+  /** プレビューキャッシュを使う(バイト数の上限) */
+  enableCache(budget: number) {
+    this.cacheBudget = budget;
+    if (this.comp) this.cache = new FrameCache(this.comp.gl, budget);
+  }
+
   /** project.json と各スケッチを読み直す。変わったレイヤーだけ作り直す。 */
   async load(): Promise<boolean> {
     const res = await (await fetch(`/api/project?work=${encodeURIComponent(work)}`)).json();
@@ -108,8 +131,17 @@ export class Engine {
       this.host.replaceChild(c, this.output);
       this.output = c;
       this.comp = new Compositor(c, p.width, p.height);
+      // テクスチャはコンテキストごとに消えるので、キャッシュも作り直す
+      this.cache = this.cacheBudget > 0 ? new FrameCache(this.comp.gl, this.cacheBudget) : null;
       for (const id of [...this.layers.keys()]) this.drop(id);
     }
+    const global = hashText(JSON.stringify([p.width, p.height, p.fps, p.seed, p.eventMap, p.markers, p.bpm, p.beatOffset, p.audio]));
+    if (global !== this.globalKey) {
+      this.globalKey = global;
+      this.cache?.clear();
+    }
+    // 合成の設定やparamsが変わると揃っていたフレームも揃わなくなるので、印だけ外す(テクスチャは残し、キーが合えば使う)
+    this.cache?.markAllIncomplete();
     // イベント対応表・マーカー・BPM(作品時刻で引く関数)
     clearMidiCache();
     try {
@@ -149,7 +181,8 @@ export class Engine {
         ({ entries: cur.params, types: cur.types } = resolveParams(cur.def, info.params));
         cur.settings = settings;
         cur.clock.set(settings, this.fps, p.duration);
-        cur.tracks = this.bindTracks(makeTracks(cur.def.tracks, info.tracks, this.fps), cur.clock);
+        cur.tracks = this.bindTracks(makeTracks(cur.def.tracks, info.tracks, this.fps), cur.clock, cur.flags);
+        cur.tracksHash = hashText(JSON.stringify(info.tracks ?? null));
         continue;
       }
       ok = (await this.loadLayer(info, cur)) && ok;
@@ -162,10 +195,27 @@ export class Engine {
     return this.project.layers?.find((l) => l.id === id) ?? { id };
   }
 
-  private bindTracks(tracks: Record<string, any>, clock: LayerClock) {
+  private bindTracks(tracks: Record<string, any>, clock: LayerClock, flags: { allTracks: boolean }) {
     const out: Record<string, any> = {};
-    for (const [k, v] of Object.entries(tracks)) out[k] = bindTime(v, TIME_ARGS.track, clock.toWork);
+    for (const [k, v] of Object.entries(tracks)) {
+      // all() を使うスケッチは、どのクリップを変えても全フレームが変わりうる
+      out[k] = { at: (t: number) => v.at(clock.toWork(t)), all: () => ((flags.allTracks = true), v.all()) };
+    }
     return out;
+  }
+
+  /** キャッシュのキーに入れる、時刻 t(レイヤー時刻の秒)に有効なクリップ */
+  private clipsKey(l: Loaded, t: number): string {
+    if (!l.def.tracks) return "";
+    if (l.flags.allTracks) return l.tracksHash;
+    return JSON.stringify(Object.keys(l.tracks).map((k) => l.tracks[k].at(t)));
+  }
+
+  /** 先に描いておく(プレビューで止まっているとき)。全レイヤーが pure のときだけ。描けたら true */
+  async prerender(frame: number): Promise<boolean> {
+    if (!this.cache || this.order.some((id) => (this.layers.get(id)?.def.mode ?? "sequential") !== "pure")) return false;
+    await this.compose(frame, frame, false);
+    return true;
   }
 
   /** 合成結果を上の行から読む(compositor.ts の readPixels) */
@@ -183,6 +233,8 @@ export class Engine {
     }
     l.renderer.dispose();
     this.layers.delete(id);
+    this.cache?.dropLayer(id);
+    this.inputSources.delete(id);
   }
 
   private async loadLayer(info: LayerInfo, prev: Loaded | undefined): Promise<boolean> {
@@ -231,7 +283,13 @@ export class Engine {
         }
         if (prev.renderer !== renderer) prev.renderer.dispose();
       }
-      this.layers.set(info.id, { url: info.url!, def, renderer, state, params, types, tracks: this.bindTracks(makeTracks(def.tracks, info.tracks, this.fps), clock), failedAt: -1, clock, settings, resolution: res });
+      const flags = { allTracks: false, usesInputs: false };
+      this.layers.set(info.id, {
+        url: info.url!, def, renderer, state, params, types, tracks: this.bindTracks(makeTracks(def.tracks, info.tracks, this.fps), clock, flags), failedAt: -1, clock, settings, resolution: res,
+        gen: ++this.gen, flags, tracksHash: hashText(JSON.stringify(info.tracks ?? null)),
+      });
+      this.cache?.dropLayer(info.id);
+      this.inputSources.delete(info.id);
       post(`/declare?work=${encodeURIComponent(work)}&sketch=${encodeURIComponent(info.sketch)}`, JSON.stringify({
         mode: def.mode ?? "sequential", renderer: def.renderer ?? (info.kind === "isf" ? "shader" : "canvas2d"), params: declaredParams(def), tracks: def.tracks ?? null,
       })).catch(() => {});
@@ -288,24 +346,50 @@ export class Engine {
     return bad.length === 0;
   }
 
-  /** frame(整数)で出ているレイヤーを、時刻 sub(モーションブラーでは小数)で描いて重ねる。画面へはまだ出さない */
-  private async compose(frame: number, sub: number) {
+  /**
+   * frame(整数)で出ているレイヤーを、時刻 sub(モーションブラーでは小数)で描いて重ねる。画面へはまだ出さない。
+   * composite=false は先描き(キャッシュに入れるだけで重ねない)
+   */
+  private async compose(frame: number, sub: number, composite = true) {
     const tw = sub / this.fps;
     advanceTo(tw * 1000);
     const { width, height } = this.project;
+    const comp = this.comp!;
     const drawn = new Map<string, HTMLCanvasElement>();
+    /** キャッシュから出したか、描いてキャッシュに入れたテクスチャ */
+    const textures = new Map<string, WebGLTexture>();
+    const hits = new Set<string>();
+    let complete = true;
     for (const id of this.order) {
       const l = this.layers.get(id);
       if (!l || !l.clock.active(frame)) continue;
+      const cacheable = !!this.cache && sub === frame && (l.def.mode ?? "sequential") === "pure" && !l.flags.usesInputs && !this.inputSources.has(id);
       const lf = l.clock.layerFrame(sub);
       // 乱数のシードとスケッチの frame はフレームの整数で(モーションブラーの中で粒がちらつかないように)
       const lframe = Math.floor(l.clock.layerFrame(frame) + 1e-9);
       const t = lf / this.fps;
       seed(this.project.seed ?? 0, lframe);
       const p = this.paramsAt(id, evalParams(l.params, l.types, lf), tw);
+      let key = "";
+      if (cacheable) {
+        key = `${id}|${l.gen}|${lf}|${lframe}|${JSON.stringify(p)}|${this.clipsKey(l, t)}|${this.globalKey}`;
+        const tex = this.cache!.get(key);
+        if (tex) {
+          textures.set(id, tex);
+          hits.add(id);
+          continue;
+        }
+      }
       const toWork = l.clock.toWork;
       const inputs = {
         layer: (name: string): HTMLCanvasElement | null => {
+          l.flags.usesInputs = true;
+          if (hits.has(name)) {
+            // キャッシュから出したレイヤーはcanvasが今のフレームではない。以後は毎回描き、このフレームは描き直す
+            this.inputSources.add(name);
+            this.needsRedraw = true;
+            return this.layers.get(name)!.renderer.canvas;
+          }
           const c = drawn.get(name);
           if (!c && !this.warned.has(`${id}>${name}`)) {
             this.warned.add(`${id}>${name}`);
@@ -327,19 +411,32 @@ export class Engine {
         l.failedAt = frame;
       }
       drawn.set(id, l.renderer.canvas);
+      if (cacheable && l.failedAt < 0 && !l.flags.usesInputs) {
+        const c = l.renderer.canvas;
+        const tex = comp.capture(c);
+        this.cache!.put(key, { tex, bytes: c.width * c.height * 4, layer: id, frame });
+        textures.set(id, tex);
+      } else {
+        complete = false;
+      }
     }
-    const comp = this.comp!;
+    if (this.cache && complete && sub === frame && !this.cache.complete.has(frame)) {
+      this.cache.complete.add(frame);
+      this.cache.changed = true;
+    }
+    if (!composite) return;
     comp.begin();
     const matteSources = new Set(this.order.map((id) => this.layers.get(id)?.settings.matte?.layer).filter(Boolean) as string[]);
     const place = (id: string) => {
       const l = this.layers.get(id)!;
-      return { source: drawn.get(id)!, ...placement(l.settings, l.clock.layerFrame(sub), width, height) };
+      return { source: textures.get(id) ?? drawn.get(id)!, ...placement(l.settings, l.clock.layerFrame(sub), width, height) };
     };
+    const has = (id: string) => textures.has(id) || drawn.has(id);
     for (const id of this.order) {
       const l = this.layers.get(id);
-      if (!l || !drawn.has(id) || l.settings.visible === false || matteSources.has(id)) continue;
+      if (!l || !has(id) || l.settings.visible === false || matteSources.has(id)) continue;
       const m = l.settings.matte;
-      const matte = m ? { placed: drawn.has(m.layer) && this.layers.has(m.layer) ? place(m.layer) : null, mode: m.mode ?? "alpha" } : undefined;
+      const matte = m ? { placed: has(m.layer) && this.layers.has(m.layer) ? place(m.layer) : null, mode: m.mode ?? "alpha" } : undefined;
       comp.layer(place(id), l.settings.blend ?? "normal", matte);
     }
   }

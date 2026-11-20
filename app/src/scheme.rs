@@ -162,6 +162,12 @@ pub fn handle(app: &tauri::AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>
             ctx["region"] = v;
             resp(200, "text/plain", vec![])
         }
+        // プレビューキャッシュの揃っている区間(プレビューが変わったときに送る)。UIのタイムラインに出す
+        "/cache" => {
+            let v: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
+            let _ = tauri::Emitter::emit_to(&c.app, "ui", "sb:cache", v);
+            resp(200, "text/plain", vec![])
+        }
         "/key" => {
             let v: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
             let _ = tauri::Emitter::emit_to(&c.app, "ui", "sb:key", v);
@@ -204,12 +210,14 @@ fn api_project(c: &Arc<Core>, work: &str) -> Response<Vec<u8>> {
         Err(e) => return json_resp(json!({ "ok": false, "error": e })),
     };
     let rev = c.rev.load(std::sync::atomic::Ordering::SeqCst);
+    // スケッチのURLの版はコードと素材が変わったときだけ変える(params の変更でsetupをやり直さない)
+    let ver = workspace::code_version(&dir);
     let layers: Vec<Value> = p
         .layers
         .iter()
         .map(|l| match workspace::sketch_entry(&dir, &l.sketch) {
-            Some((_, "isf")) => json!({ "id": l.id, "sketch": l.sketch, "kind": "isf", "url": format!("/work/{work}/isf/{}?v={rev}", l.sketch), "params": l.params, "tracks": l.rest.get("tracks") }),
-            Some(_) => json!({ "id": l.id, "sketch": l.sketch, "kind": "ts", "url": format!("/work/{work}/build/{}?v={rev}", l.sketch), "params": l.params, "tracks": l.rest.get("tracks") }),
+            Some((_, "isf")) => json!({ "id": l.id, "sketch": l.sketch, "kind": "isf", "url": format!("/work/{work}/isf/{}?v={ver}", l.sketch), "params": l.params, "tracks": l.rest.get("tracks") }),
+            Some(_) => json!({ "id": l.id, "sketch": l.sketch, "kind": "ts", "url": format!("/work/{work}/build/{}?v={ver}", l.sketch), "params": l.params, "tracks": l.rest.get("tracks") }),
             None => json!({ "id": l.id, "sketch": l.sketch, "kind": "missing", "params": l.params, "tracks": l.rest.get("tracks") }),
         })
         .collect();

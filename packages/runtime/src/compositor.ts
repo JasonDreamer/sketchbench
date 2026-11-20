@@ -12,7 +12,8 @@ const MATTE_ID: Record<MatteMode, number> = { alpha: 1, alphaInverted: 2, luma: 
 export type InvTransform = Float32Array;
 
 export interface Placed {
-  source: TexImageSource;
+  /** レイヤーのcanvas。tex があればそちらを使う(キャッシュ済み) */
+  source: TexImageSource | WebGLTexture;
   inv: InvTransform;
   opacity: number;
 }
@@ -176,13 +177,30 @@ export class Compositor {
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
-  private upload(source: TexImageSource) {
+  private upload(source: TexImageSource | WebGLTexture) {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE1);
+    if (source instanceof WebGLTexture) {
+      gl.bindTexture(gl.TEXTURE_2D, source);
+      return;
+    }
     gl.bindTexture(gl.TEXTURE_2D, this.src);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  }
+
+  /** canvasを新しいテクスチャに写して返す(プレビューキャッシュ用。大きさはcanvasのまま) */
+  capture(source: HTMLCanvasElement): WebGLTexture {
+    const gl = this.gl;
+    const tex = gl.createTexture()!;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    this.params(gl.LINEAR);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    return tex;
   }
 
   /** 透明で始める */

@@ -71,6 +71,8 @@ export function App() {
   const [exportOpen, setExportOpen] = createSignal(false);
   const [queue, setQueue] = createSignal<QueueItem[]>([]);
   /** 書き出し中のジョブの進み具合(ジョブid → 描いたフレーム数) */
+  /** プレビューキャッシュの揃っている区間 */
+  const [cached, setCached] = createSignal<[number, number][]>([]);
   const [progress, setProgress] = createSignal<Record<string, number>>({});
 
   const refresh = async () => {
@@ -132,6 +134,7 @@ export function App() {
         if (e.payload.id && e.payload.done != null) setProgress((m) => ({ ...m, [e.payload.id]: e.payload.done! }));
       }),
       listen<{ items: QueueItem[] }>("sb:queue", (e) => setQueue(e.payload.items)),
+      listen<{ ranges: [number, number][] }>("sb:cache", (e) => setCached(e.payload.ranges)),
       listen("sb:reload", () => refresh()),
       // CC割り当ての学習: 選んだparamに、次に動かしたコントローラーを割り当てる
       listen<{ type: string; channel: number; controller: number }>("sb:midi", (e) => {
@@ -209,6 +212,7 @@ export function App() {
   const open = async (w: string) => {
     try {
       await invoke("open_work", { work: w });
+      setCached([]);
       setSelection(null);
       await refresh();
       reportRect();
@@ -402,6 +406,7 @@ export function App() {
               decls={decls()}
               frame={currentFrame}
               playing={() => time().playing}
+              cached={cached}
               selection={selection}
               select={setSelection}
               seek={(f, scrub) => seek(f, scrub)}

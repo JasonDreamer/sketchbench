@@ -22,6 +22,8 @@ type Props = {
   decls: Record<string, any>;
   frame: () => number;
   playing: () => boolean;
+  /** プレビューキャッシュの揃っている区間 [start, end) */
+  cached: () => [number, number][];
   selection: () => Selection | null;
   select: (s: Selection | null) => void;
   seek: (frame: number, scrub: boolean) => void;
@@ -295,6 +297,12 @@ export function Timeline(props: Props) {
           g.fillRect(x, gridTop, 1, h - gridTop);
         }
       }
+    }
+    // プレビューキャッシュの揃っている区間(ルーラーの下端)
+    g.fillStyle = COLORS.event;
+    for (const [a, b] of props.cached()) {
+      const x0 = Math.max(v.gutter, xOf(v, a)), x1 = xOf(v, b);
+      if (x1 > x0) g.fillRect(x0, gridTop - 3, x1 - x0, 2);
     }
     // 尺の終わり
     const xe = xOf(v, proj.duration);

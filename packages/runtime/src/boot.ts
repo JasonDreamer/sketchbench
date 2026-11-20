@@ -43,8 +43,24 @@ async function preview() {
   });
 
   setPhase("setup");
+  // プレビューキャッシュ(RAM)。上限は設計書の既定どおり2GB
+  engine.enableCache(2 * 1024 ** 3);
   await engine.load();
   setPhase("ready");
+
+  // キャッシュの揃っている区間を UI のタイムラインへ送る
+  let sentCache = "";
+  /** 先に描いても揃わなかったフレーム(pure でないレイヤーの失敗など)。読み直すまで先描きしない */
+  const unfillable = new Set<number>();
+  real.setInterval(() => {
+    const c = engine.cache;
+    if (!c || !c.changed) return;
+    c.changed = false;
+    const body = JSON.stringify({ ranges: c.ranges(), bytes: c.bytes, budget: c.budget });
+    if (body === sentCache) return;
+    sentCache = body;
+    post("/cache", body).catch(() => {});
+  }, 500);
 
   // 描画時間を2秒ごとに送る(get_diagnostics の frameTimeMs)
   let frameTimes: number[] = [];
@@ -65,6 +81,7 @@ async function preview() {
     try {
       if (reloadPending) {
         reloadPending = false;
+        unfillable.clear();
         setPhase("setup");
         await engine.load();
         setPhase("ready");
@@ -81,10 +98,25 @@ async function preview() {
         const r0 = real.performanceNow();
         await engine.render(frame);
         frameTimes.push(real.performanceNow() - r0);
+        if (engine.needsRedraw) {
+          engine.needsRedraw = false;
+          dirty = true;
+        }
         if (measuring) {
           const done = real.unixMs();
           log("info", `変更の検知から描画まで ${Math.round(done - reloadDetectedAt)} ms(描画時刻 ${Math.round(done)})`, { detectedUnixMs: reloadDetectedAt, renderedUnixMs: done });
           reloadDetectedAt = 0;
+        }
+      }
+      else if (!time.playing && !reloadPending && engine.cache) {
+        // 止まっている間は、再生ヘッドから先(最大10秒)のまだないフレームを先に描いておく(1回の rAF で8msまで)
+        const c = engine.cache;
+        const until = Math.min(dur, frame + Math.round(10 * time.fps));
+        const t0 = real.performanceNow();
+        for (let f = frame + 1; f < until && real.performanceNow() - t0 < 8 && c.bytes < c.budget * 0.9; f++) {
+          if (c.complete.has(f) || unfillable.has(f)) continue;
+          if (!(await engine.prerender(f))) break;
+          if (!c.complete.has(f)) unfillable.add(f);
         }
       }
     } catch (e) {

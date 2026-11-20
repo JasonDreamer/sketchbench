@@ -239,3 +239,25 @@ pub fn add_sketch(ws: &Path, work_dir: &Path, template: &str, name: &str) -> Res
     copy_tree(&src, &dst, &|_| false).map_err(|e| e.to_string())?;
     Ok(format!("sketches/{name}"))
 }
+
+/// スケッチを読み直すかどうかの版。project.json・.cache・renders・.git 以外のファイルの名前・大きさ・更新時刻から作る
+/// (params や合成の設定を変えただけでは変わらないので、スケッチの setup をやり直さずに済む)
+pub fn code_version(work_dir: &Path) -> String {
+    let mut h = blake3::Hasher::new();
+    for f in walk(work_dir) {
+        let rel = f.strip_prefix(work_dir).unwrap();
+        let first = rel.components().next().map(|c| c.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
+        if first == ".cache" || first == "renders" || first == ".git" || rel.as_os_str() == "project.json" {
+            continue;
+        }
+        h.update(rel.to_string_lossy().replace('\\', "/").as_bytes());
+        if let Ok(m) = std::fs::metadata(&f) {
+            h.update(&m.len().to_le_bytes());
+            if let Ok(t) = m.modified().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other)) {
+                h.update(&t.as_nanos().to_le_bytes());
+            }
+        }
+        h.update(&[0]);
+    }
+    h.finalize().to_hex()[..12].to_string()
+}
