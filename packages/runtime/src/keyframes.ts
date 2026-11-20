@@ -15,7 +15,8 @@ export interface Keyed {
   keys?: Key[];
 }
 
-const PRESETS: Record<string, [number, number, number, number]> = {
+/** 名前つきイージングの cubic-bezier(グラフエディタも同じ値で描く) */
+export const PRESETS: Record<string, [number, number, number, number]> = {
   easeIn: [0.42, 0, 1, 1],
   easeOut: [0, 0, 0.58, 1],
   easeInOut: [0.42, 0, 0.58, 1],

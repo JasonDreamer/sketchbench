@@ -6,6 +6,7 @@ import { isNtsc, smpte, type ProjectLike, type TimeDisplay } from "./timeline-mo
 import { SeamView } from "./SeamView";
 import { Areas, type AreasApi } from "./Areas";
 import { CodeEditor } from "./CodeEditor";
+import { GraphEditor } from "./GraphEditor";
 import { EDITOR_NAMES, loadWorkspaces, saveAsDefault, saveWorkspaces, type EditorTag, type WorkspaceSet } from "./workspaces";
 import type { AreasLayout } from "sliced-areas";
 import { ParamPanel, type ParamApi } from "./ParamPanel";
@@ -550,6 +551,12 @@ export function App() {
             </div>
             <QueueList items={queue()} progress={progress()} close={() => {}} fail={fail} />
           </div>
+        );
+      case "graph":
+        return (
+          <Show when={project()} fallback={<div class="hint">作品を開くとキーフレームのカーブが出ます。</div>}>
+            {(p) => <GraphEditor project={p()} decls={decls()} frame={currentFrame} seek={(f) => seek(f, true)} edit={edit} status={setStatus} />}
+          </Show>
         );
       case "code":
         return (
