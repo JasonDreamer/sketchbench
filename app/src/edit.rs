@@ -48,6 +48,9 @@ pub enum Op {
     /// キーフレームを丸ごと置き換える(MCPの set_keyframes)。空にすると value だけが残る
     #[serde(rename_all = "camelCase")]
     SetKeys { target: KeyTarget, keys: Vec<Value> },
+    /// 音声トラックの一覧を置き換える([{ asset, offset?, gain? }])
+    #[serde(rename_all = "camelCase")]
+    SetAudio { audio: Vec<Value> },
     /// project.json の中の素材の参照を from から to に付け替える(リンク切れの再リンク)
     #[serde(rename_all = "camelCase")]
     RelinkAsset { from: String, to: String },
@@ -162,6 +165,7 @@ impl Op {
             Op::UpdateLayer { layer, set } => format!("{layer} の{}を変更", set.keys().map(|k| k.as_str()).collect::<Vec<_>>().join("・")),
             Op::MoveLayer { layer, .. } => format!("{layer} の重ね順を変更"),
             Op::RelinkAsset { from, to } => format!("素材 {from} を {to} に付け替え"),
+            Op::SetAudio { audio } => format!("音声トラックを{}本に", audio.len()),
             Op::SetLoop { start: None, end: None } => "ループ範囲を外す".into(),
             Op::SetLoop { .. } => "ループ範囲を変更".into(),
             Op::DeleteLayer { layer } => format!("{layer} を削除"),
@@ -360,6 +364,14 @@ impl Editor {
                         l.insert(k, val);
                     }
                 }
+            }
+            Op::SetAudio { audio } => {
+                for a in &audio {
+                    if a["asset"].as_str().is_none() {
+                        return Err("各音声トラックに asset(作品からの相対パス)が要る".into());
+                    }
+                }
+                v["audio"] = json!(audio);
             }
             Op::RelinkAsset { from, to } => {
                 if crate::assets_check::relink(&mut v, &from, &to) == 0 {

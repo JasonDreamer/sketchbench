@@ -21,6 +21,8 @@
     "allow-measure-loudness",
     "allow-render-stills",
     "allow-relink-pick",
+    "allow-assets-list",
+    "allow-assets-import",
     "allow-lsp-start",
     "allow-lsp-send",
     "allow-code-files",

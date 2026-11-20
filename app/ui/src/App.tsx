@@ -7,6 +7,7 @@ import { SeamView } from "./SeamView";
 import { Areas, type AreasApi } from "./Areas";
 import { CodeEditor } from "./CodeEditor";
 import { GraphEditor } from "./GraphEditor";
+import { AssetsPanel } from "./AssetsPanel";
 import { EDITOR_NAMES, loadWorkspaces, saveAsDefault, saveWorkspaces, type EditorTag, type WorkspaceSet } from "./workspaces";
 import type { AreasLayout } from "sliced-areas";
 import { ParamPanel, type ParamApi } from "./ParamPanel";
@@ -564,8 +565,14 @@ export function App() {
             {(w) => <CodeEditor work={w} preferred={project()?.layers[0]?.sketch} status={setStatus} fail={fail} />}
           </Show>
         );
+      case "assets":
+        return (
+          <Show when={work() && project() ? work() : null} keyed fallback={<div class="hint">作品を開くと素材の一覧が出ます。</div>}>
+            {(w) => <AssetsPanel work={w} project={project()!} edit={edit} status={setStatus} fail={fail} />}
+          </Show>
+        );
       default:
-        return <div class="hint">{EDITOR_NAMES[tag]}は次の段階で入れます。</div>;
+        return <div class="hint">{EDITOR_NAMES[tag]}</div>;
     }
   };
 

@@ -16,6 +16,8 @@ const COMMANDS: &[&str] = &[
     "measure_loudness",
     "render_stills",
     "relink_pick",
+    "assets_list",
+    "assets_import",
     "lsp_start",
     "lsp_send",
     "code_files",

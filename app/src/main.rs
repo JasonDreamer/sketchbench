@@ -171,6 +171,29 @@ async fn relink_pick(app: AppHandle, from: String) -> CmdResult {
     Ok(json!({ "to": to }))
 }
 
+/// 開いている作品の素材の一覧
+#[tauri::command]
+fn assets_list(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    Ok(json!({ "assets": assets_check::list(&c.work_dir()?) }))
+}
+
+/// ファイルを作品の assets/ に写す(ウィンドウへのドロップから)。写した先の相対パスを返す
+#[tauri::command]
+fn assets_import(app: AppHandle, paths: Vec<String>) -> CmdResult {
+    let c = core(&app);
+    let dir = c.work_dir()?;
+    let mut done = vec![];
+    for p in paths {
+        let src = std::path::PathBuf::from(&p);
+        if src.is_dir() {
+            return Err(format!("{p} はフォルダ(ファイルを選んでドロップする)"));
+        }
+        done.push(assets_check::import_file(&dir, &src)?);
+    }
+    Ok(json!({ "imported": done }))
+}
+
 /// 言語サーバーを(動いていなければ)起動し、作業フォルダのURIを返す
 #[tauri::command]
 fn lsp_start(app: AppHandle) -> CmdResult {
@@ -420,6 +443,8 @@ fn main() {
             measure_loudness,
             render_stills,
             relink_pick,
+            assets_list,
+            assets_import,
             lsp_start,
             lsp_send,
             code_files,

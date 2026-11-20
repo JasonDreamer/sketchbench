@@ -28,6 +28,32 @@ fn references(p: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// 作品の assets/ のファイルの一覧(種類・大きさ・project.json で参照している場所)
+pub fn list(dir: &Path) -> Value {
+    let p: Value = std::fs::read_to_string(dir.join("project.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let refs = references(&p);
+    let mut out: Vec<Value> = workspace::walk(&dir.join("assets"))
+        .into_iter()
+        .filter_map(|f| {
+            let rel = f.strip_prefix(dir).ok()?.to_string_lossy().replace('\\', "/");
+            let ext = rel.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+            let kind = match ext.as_str() {
+                "wav" | "mp3" | "flac" | "ogg" | "m4a" | "aac" | "aif" | "aiff" => "audio",
+                "mid" | "midi" => "midi",
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => "image",
+                "ttf" | "otf" | "woff" | "woff2" => "font",
+                "mp4" | "mov" | "webm" | "mkv" => "video",
+                "json" | "csv" | "txt" => "data",
+                _ => "other",
+            };
+            let used: Vec<&String> = refs.iter().filter(|(_, r)| r.trim_start_matches("./") == rel).map(|(place, _)| place).collect();
+            Some(json!({ "rel": rel, "kind": kind, "size": std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0), "usedBy": used }))
+        })
+        .collect();
+    out.sort_by(|a, b| a["rel"].as_str().cmp(&b["rel"].as_str()));
+    json!(out)
+}
+
 /// 見つからない素材の一覧。作品フォルダの中に同じ名前のファイルがあれば候補に挙げる
 pub fn missing(dir: &Path) -> Value {
     let Ok(text) = std::fs::read_to_string(dir.join("project.json")) else { return json!([]) };
