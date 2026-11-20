@@ -195,6 +195,15 @@ pub fn start(core: &Arc<Core>, opt: ExportOptions) -> Result<Value, String> {
     if opt.loudness.is_some() && opt.format != "mp4" {
         return Err("loudness はMP4だけ(音声を持つ形式)".into());
     }
+    // 同じ秒に同じ作品を書き出すと名前がぶつかるので、あれば番号を付ける(上書きしない)
+    let taken = |b: &str| ["", ".mp4", ".part", ".mp4.part"].iter().any(|ext| renders.join(format!("{b}{ext}")).exists());
+    if taken(&base) {
+        let mut n = 2;
+        while taken(&format!("{base}-{n}")) {
+            n += 1;
+        }
+        base = format!("{base}-{n}");
+    }
     let (out, part, file) = match opt.format.as_str() {
         "mp4" => {
             let out = renders.join(format!("{base}.mp4"));

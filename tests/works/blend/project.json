@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "width": 480,
+  "height": 270,
+  "fps": [
+    30,
+    1
+  ],
+  "duration": 90,
+  "seed": 1,
+  "layers": [
+    {
+      "id": "base",
+      "sketch": "sketches/solid",
+      "params": {
+        "color": "#4080c0"
+      }
+    },
+    {
+      "id": "normal",
+      "sketch": "sketches/solid",
+      "blend": "normal",
+      "params": {
+        "color": "#ff0000"
+      },
+      "transform": {
+        "scale": 0.15,
+        "position": [
+          50,
+          135
+        ]
+      }
+    },
+    {
+      "id": "add",
+      "sketch": "sketches/solid",
+      "blend": "add",
+      "params": {
+        "color": "#ff0000"
+      },
+      "transform": {
+        "scale": 0.15,
+        "position": [
+          145,
+          135
+        ]
+      }
+    },
+    {
+      "id": "multiply",
+      "sketch": "sketches/solid",
+      "blend": "multiply",
+      "params": {
+        "color": "#ff0000"
+      },
+      "transform": {
+        "scale": 0.15,
+        "position": [
+          240,
+          135
+        ]
+      }
+    },
+    {
+      "id": "screen",
+      "sketch": "sketches/solid",
+      "blend": "screen",
+      "params": {
+        "color": "#ff0000"
+      },
+      "transform": {
+        "scale": 0.15,
+        "position": [
+          335,
+          135
+        ]
+      }
+    },
+    {
+      "id": "difference",
+      "sketch": "sketches/solid",
+      "blend": "difference",
+      "params": {
+        "color": "#ff0000"
+      },
+      "transform": {
+        "scale": 0.15,
+        "position": [
+          430,
+          135
+        ]
+      }
+    },
+    {
+      "id": "half",
+      "sketch": "sketches/solid",
+      "opacity": {
+        "value": 0.5,
+        "keys": [
+          {
+            "frame": 0,
+            "value": 0.2
+          },
+          {
+            "frame": 89,
+            "value": 0.9
+          }
+        ]
+      },
+      "params": {
+        "color": "#ffffff"
+      },
+      "transform": {
+        "scale": [
+          0.15,
+          0.15
+        ],
+        "position": {
+          "value": [
+            240,
+            225
+          ],
+          "keys": [
+            {
+              "frame": 0,
+              "value": [
+                60,
+                225
+              ]
+            },
+            {
+              "frame": 89,
+              "value": [
+                420,
+                225
+              ]
+            }
+          ]
+        },
+        "rotation": 45
+      }
+    }
+  ]
+}

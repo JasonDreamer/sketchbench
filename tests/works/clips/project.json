@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "width": 480,
+  "height": 270,
+  "fps": [
+    30,
+    1
+  ],
+  "duration": 90,
+  "seed": 1,
+  "bpm": 120,
+  "beatOffset": 3,
+  "markers": [
+    {
+      "name": "a",
+      "start": 0,
+      "end": 40
+    },
+    {
+      "name": "b",
+      "start": 40,
+      "end": 90
+    }
+  ],
+  "eventMap": {
+    "flash": {
+      "times": [
+        0.5,
+        1.2,
+        2
+      ]
+    }
+  },
+  "audio": [
+    {
+      "asset": "assets/beat.wav",
+      "offset": 0
+    }
+  ],
+  "layers": [
+    {
+      "id": "L1",
+      "sketch": "sketches/main",
+      "params": {
+        "hue": {
+          "value": 200,
+          "keys": [
+            {
+              "frame": 0,
+              "value": 200
+            },
+            {
+              "frame": 89,
+              "value": 320
+            }
+          ]
+        }
+      },
+      "tracks": {
+        "words": {
+          "c1": {
+            "start": 5,
+            "end": 30,
+            "value": {
+              "text": "あ",
+              "size": {
+                "value": 30,
+                "keys": [
+                  {
+                    "frame": 0,
+                    "value": 20
+                  },
+                  {
+                    "frame": 25,
+                    "value": 60
+                  }
+                ]
+              },
+              "color": "#ffffff"
+            }
+          },
+          "c2": {
+            "start": 25,
+            "end": 60,
+            "value": {
+              "text": "いう",
+              "size": 40,
+              "color": "#ffcc66"
+            }
+          },
+          "c3": {
+            "start": 55,
+            "end": 89,
+            "value": {
+              "text": "えお",
+              "size": 36,
+              "color": {
+                "value": "#66ccff",
+                "keys": [
+                  {
+                    "frame": 0,
+                    "value": "#66ccff"
+                  },
+                  {
+                    "frame": 30,
+                    "value": "#ff6699"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

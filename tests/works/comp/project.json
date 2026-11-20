@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "width": 480,
+  "height": 270,
+  "fps": [
+    30,
+    1
+  ],
+  "duration": 90,
+  "seed": 1,
+  "layers": [
+    {
+      "id": "bg",
+      "sketch": "sketches/bg",
+      "resolution": 0.5,
+      "params": {}
+    },
+    {
+      "id": "mask",
+      "sketch": "sketches/mask",
+      "params": {}
+    },
+    {
+      "id": "lines",
+      "sketch": "sketches/lines",
+      "blend": "add",
+      "matte": {
+        "layer": "mask",
+        "mode": "alpha"
+      },
+      "opacity": {
+        "value": 1,
+        "keys": [
+          {
+            "frame": 0,
+            "value": 0.3
+          },
+          {
+            "frame": 60,
+            "value": 1
+          }
+        ]
+      },
+      "transform": {
+        "rotation": 15,
+        "scale": {
+          "value": 1,
+          "keys": [
+            {
+              "frame": 0,
+              "value": 0.6
+            },
+            {
+              "frame": 60,
+              "value": 1.2,
+              "ease": "easeInOut"
+            }
+          ]
+        }
+      },
+      "params": {
+        "density": 0.8,
+        "color": "#66ccff"
+      }
+    },
+    {
+      "id": "mirror",
+      "sketch": "sketches/mirror",
+      "start": 20,
+      "end": 80,
+      "params": {}
+    }
+  ]
+}

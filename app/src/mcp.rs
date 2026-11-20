@@ -298,6 +298,8 @@ pub struct ExportSpec {
     pub loudness: Option<export::LoudnessTarget>,
     /// ファイル名の末尾に付ける名前(英数字・-・_)
     pub name: Option<String>,
+    /// 連番PNGを描く順番 "forward"(既定)・"reverse"・"shuffle"。決定性の確認用(同じ画像になるはず)
+    pub order: Option<String>,
 }
 
 impl ExportSpec {
@@ -314,6 +316,7 @@ impl ExportSpec {
             motion_blur: self.motion_blur,
             loudness: self.loudness,
             name: self.name,
+            order: self.order,
             ..Default::default()
         }
     }
