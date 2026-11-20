@@ -181,6 +181,33 @@ params の値と、クリップのフィールドの値は、そのままの値�
 
 音声・MIDI・`events`・`section`・`beats`・`tracks` の関数には、スケッチが受け取った `t`(レイヤー時刻)をそのまま渡せます。アプリが作品時刻に直して引きます。`markers` と、`song.beats` などの時刻の配列は作品時刻の秒です。
 
+### 文字(縦書き・ルビ・モーラ・グリフ)
+
+`import { text } from "@sketchbench/runtime"` の関数で、Canvas2Dにない縦書きとルビを組みます。位置を計算する関数と描く関数が分かれているので、1文字ずつ動かす演出にも使えます(p5 では `g.drawingContext` を渡します)。
+
+```ts
+async setup({ assets }) {
+  await assets.font("Noto", "NotoSansJP.otf");           // CSSのフォントとして読み込む
+  return { glyph: await assets.glyphs("NotoSansJP.otf") }; // 輪郭と点列
+},
+draw({ g, width }, { glyph }) {
+  const v = text.layoutRuby(g, "｜東京《とうきょう》の夜《よる》", { x: width - 100, y: 80, size: 56, family: "Noto", vertical: true });
+  text.drawPlaced(g, v.base, { family: "Noto" });  // 親文字
+  text.drawPlaced(g, v.ruby, { family: "Noto" });  // ルビ
+  const pts = glyph.points("歌", 100, 600, 400, 6);  // 輪郭に沿って6pxごとの点(輪郭ごとの配列)
+},
+```
+
+| 関数 | 内容 |
+| --- | --- |
+| `layoutVertical` / `layoutHorizontal` | 文字ごとの位置(中心の x, y、回すか、何行目か)。縦書きは右から左へ。英数字・括弧・長音は90度回し、小書きの仮名と句読点は右上へ寄せる |
+| `layoutRuby` | ルビつきの配置。記法は青空文庫と同じ「｜親文字《るび》」「漢字《るび》」 |
+| `drawPlaced` | 置いた文字を描く(色は先に `g.fillStyle` で) |
+| `moras` | 仮名をモーラに分ける(「きょう」→「きょ」「う」) |
+| `assets.glyphs(path)` | フォントファイルの `path`(Path2D と命令)、`glyphs`(1文字ずつ)、`points`(等間隔の点)、`width` |
+
+フォントは作品の `assets/` に置いてください(システムのフォントは書き出す環境で変わることがあります)。
+
 ### 状態を持つ表現(stateful)
 
 粒子や物理のように前のフレームの結果から次を作る表現は、状態を `setup` で作り、`simulate` で1フレームずつ進め、`draw` では読むだけにします。アプリが2秒ごとに状態を複製して保存点にし、シークでは直前の保存点から計算し直すので、どの時刻へ飛んでも、書き出しでも同じ結果になります。

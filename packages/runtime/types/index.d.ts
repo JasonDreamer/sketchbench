@@ -97,8 +97,74 @@ export interface Assets {
   image(path: string): Promise<HTMLImageElement>;
   text(path: string): Promise<string>;
   json<T = unknown>(path: string): Promise<T>;
+  /** CSSのフォントとして読み込む(fillText や text.layoutVertical で family の名前で使う) */
   font(family: string, path: string): Promise<FontFace>;
+  /** フォントファイル(.ttf・.otf)の輪郭と点列を取る */
+  glyphs(path: string): Promise<GlyphFont>;
 }
+
+/** 文字モジュールが置いた1文字(x, y は文字の中心) */
+export interface PlacedChar {
+  ch: string;
+  x: number;
+  y: number;
+  size: number;
+  /** 縦書きで90度回して置く */
+  rotate: boolean;
+  /** 元の文字列での位置 */
+  index: number;
+  /** 何行目(縦書きでは右から何列目) */
+  line: number;
+}
+
+export interface TextLayoutOptions {
+  /** 縦書き: 1列目の中心のxと上端のy。横書き: 左端のxと1行目の中心のy */
+  x: number;
+  y: number;
+  size: number;
+  /** assets.font で読み込んだ名前 */
+  family: string;
+  weight?: string;
+  /** 文字の間隔と行の間隔(文字の大きさに対する割合。行の既定 0.6) */
+  letterSpacing?: number;
+  lineGap?: number;
+  /** 1行の最大の長さ(px)。超えたら折り返す */
+  maxLength?: number;
+}
+
+export interface PathCommand {
+  type: "M" | "L" | "Q" | "C" | "Z";
+  x?: number;
+  y?: number;
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+}
+
+export interface GlyphFont {
+  width(text: string, size: number): number;
+  /** 文字列の輪郭。x, y はベースラインの左端 */
+  path(text: string, x: number, y: number, size: number): { commands: PathCommand[]; path2d: Path2D };
+  /** 1文字ずつの輪郭と送り幅 */
+  glyphs(text: string, x: number, y: number, size: number): { ch: string; x: number; width: number; commands: PathCommand[]; path2d: Path2D }[];
+  /** 輪郭に沿って spacing(px)ごとに置いた点。輪郭ごとの配列 */
+  points(text: string, x: number, y: number, size: number, spacing?: number): { x: number; y: number }[][];
+}
+
+/** 文字モジュール(縦書き・ルビ・モーラ)。描くのは Canvas2D(p5 では g.drawingContext を渡す) */
+export const text: {
+  layoutVertical(g: CanvasRenderingContext2D, text: string, o: TextLayoutOptions): PlacedChar[];
+  layoutHorizontal(g: CanvasRenderingContext2D, text: string, o: TextLayoutOptions): PlacedChar[];
+  /** 置いた文字を描く(色などは先に g に設定しておく) */
+  drawPlaced(g: CanvasRenderingContext2D, items: PlacedChar[], o: { family: string; weight?: string }): void;
+  /** 青空文庫の記法「｜親文字《るび》」「漢字《るび》」を読む */
+  parseRuby(s: string): { base: string; ruby?: string }[];
+  /** ルビつきの配置。ルビは親文字の上(縦書きでは右)の中央に置く */
+  layoutRuby(g: CanvasRenderingContext2D, segs: { base: string; ruby?: string }[] | string, o: TextLayoutOptions & { vertical?: boolean; rubySize?: number }): { base: PlacedChar[]; ruby: PlacedChar[] };
+  /** 仮名をモーラに分ける(「きょう」→ ["きょ", "う"]) */
+  moras(s: string): string[];
+};
 
 export interface SetupContext<R extends RendererKind, P extends Record<string, ParamDecl>> {
   width: number;

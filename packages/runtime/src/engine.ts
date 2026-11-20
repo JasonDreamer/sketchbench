@@ -10,6 +10,7 @@ import { makeTracks } from "./tracks.js";
 import { evaluate } from "./keyframes.js";
 import { Compositor, type AlphaMode } from "./compositor.js";
 import { FrameCache, hashText } from "./cache.js";
+import { loadGlyphFont } from "./text.js";
 import { bindTime, LayerClock, placement, TIME_ARGS, type LayerSettings } from "./layer.js";
 import { beatsFn, clearMidiCache, Events, fetchMidi, loadMidi, makeMarkers, MidiTrack, sectionFn, type MarkerInfo } from "./midi.js";
 
@@ -681,6 +682,10 @@ function assetsApi(project: ProjectInfo, clock: LayerClock) {
     /** MIDIファイル。offset は秒(作品時刻でのファイルの先頭) */
     async midi(rel: string, opts: { offset?: number } = {}) {
       return bindTime(await loadMidi(work, rel, opts.offset ?? 0), TIME_ARGS.midi, clock.toWork);
+    },
+    /** フォントファイルの輪郭と点列(文字モジュールの GlyphFont) */
+    async glyphs(rel: string) {
+      return loadGlyphFont(url(rel));
     },
     async font(family: string, rel: string) {
       const f = new FontFace(family, `url(${url(rel)})`);

@@ -87,6 +87,7 @@ fn import_map() -> Value {
         "@sketchbench/runtime": "/runtime/index.js",
         "p5": "/vendor/p5.js",
         "mediabunny": "/vendor/mediabunny.js",
+        "opentype.js": "/vendor/opentype.js",
     }})
 }
 
@@ -128,6 +129,7 @@ pub fn handle(app: &tauri::AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>
         }
         "/vendor/p5.js" => file(&repo.join("node_modules/p5/lib/p5.esm.min.js")),
         "/vendor/mediabunny.js" => file(&repo.join("node_modules/mediabunny/dist/bundles/mediabunny.min.mjs")),
+        "/vendor/opentype.js" => file(&repo.join("node_modules/opentype.js/dist/opentype.min.mjs")),
         "/api/project" => api_project(&c, &query(&req, "work").unwrap_or_default()),
         p if p.starts_with("/work/") => work_file(&c, p, &req),
         "/hb" | "/state" | "/hello" => {

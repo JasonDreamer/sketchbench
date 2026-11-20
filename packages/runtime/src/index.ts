@@ -6,3 +6,4 @@ export function defineSketch<T>(def: T): T {
 }
 
 export { rand } from "./rand.js";
+export * as text from "./text.js";
