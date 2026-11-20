@@ -16,6 +16,8 @@ mod midi;
 mod midi_live;
 mod player;
 mod queue;
+mod session;
+mod assets_check;
 mod schema;
 mod scheme;
 mod workspace;
@@ -48,6 +50,10 @@ fn get_state(app: AppHandle) -> CmdResult {
         "declarations": work.as_ref().and_then(|w| workspace::work_dir(&c.ws, w)).map(|d| read_declarations(&d)).unwrap_or(Value::Null),
         "time": c.clock.msg(),
         "logs": *c.logs.lock().unwrap(),
+        // 前回開いていた作品と位置、前回が異常終了だったか(起動時の復元に使う)
+        "session": session::load(&c),
+        "crashed": session::crashed(),
+        "missingAssets": work.as_ref().and_then(|w| workspace::work_dir(&c.ws, w)).map(|d| assets_check::missing(&d)).unwrap_or(json!([])),
     }))
 }
 
@@ -142,6 +148,26 @@ async fn render_stills(app: AppHandle, frames: Vec<u64>, max_size: Option<u32>) 
     }
     let images: Vec<Value> = o.images.iter().map(|(f, b)| serde_json::json!({ "frame": f, "png": base64::engine::general_purpose::STANDARD.encode(b) })).collect();
     Ok(serde_json::json!({ "images": images }))
+}
+
+/// リンク切れの素材の代わりのファイルを選び、作品の assets/ に写す(素材を作品の中に集める)。
+/// 付け替えはUIが edit_project の relinkAsset で行う(取り消しと履歴の扱いをほかの操作と揃える)
+#[tauri::command]
+async fn relink_pick(app: AppHandle, from: String) -> CmdResult {
+    use tauri_plugin_dialog::DialogExt;
+    let c = core(&app);
+    let dir = c.work_dir()?;
+    let name = from.rsplit('/').next().unwrap_or(&from).to_string();
+    let picked = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || app.dialog().file().set_title(format!("{name} の代わりのファイル")).blocking_pick_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(fp) = picked else { return Ok(json!({ "canceled": true })) };
+    let src = fp.into_path().map_err(|e| e.to_string())?;
+    let to = assets_check::import_file(&dir, &src)?;
+    Ok(json!({ "to": to }))
 }
 
 /// レンダーキューに積む(複数の仕様をまとめて積める)
@@ -292,6 +318,7 @@ fn main() {
     let background = std::env::args().any(|a| a == "--background");
     tauri::Builder::default()
         // 単一インスタンス: 2つ目の起動はウィンドウを前に出すだけ(sb mcp と sb render は既存のアプリに依頼する)
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if !args.iter().any(|a| a == "--background") {
                 if let Some(w) = app.get_window("main") {
@@ -330,6 +357,7 @@ fn main() {
             queue_clear,
             measure_loudness,
             render_stills,
+            relink_pick,
             edit_project,
             undo,
             redo,
@@ -347,6 +375,7 @@ fn main() {
                 eprintln!("作業フォルダを用意できない: {e}");
             }
             app.manage(c.clone());
+            session::start(c.clone());
             // --background は sb mcp が未起動のアプリを立ち上げるとき。ウィンドウを出さずに動く
             let win = tauri::window::WindowBuilder::new(app, "main").title("Sketchbench").inner_size(1600.0, 960.0).visible(!background).build()?;
             let size = win.inner_size()?.to_logical::<f64>(win.scale_factor()?);
@@ -409,6 +438,14 @@ fn main() {
             // 別環境の子WebViewを作ると ERROR_BUSY(0x800700AA)で失敗することがあった
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, ev| {
+            // 正常に終わるときは異常終了の印を消す
+            if let tauri::RunEvent::Exit = ev {
+                if let Some(c) = app.try_state::<Arc<Core>>() {
+                    session::clean_exit(&c);
+                }
+            }
+        });
 }

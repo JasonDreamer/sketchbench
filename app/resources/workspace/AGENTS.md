@@ -276,6 +276,7 @@ Sketchbench のMCPサーバー(`sketchbench`)につながっていれば、人�
 | `export` | MP4(音声付き)か連番PNGで書き出し、終わるまで待つ。大きさ(`width`・`height`)、連番PNGの `depth`(8・16)と `alpha`(straight・premultiplied・none)、`motionBlur`(`{ samples, shutter }`、pure のスケッチだけ)、MP4の `loudness`(`{ lufs: -14 }` など。トゥルーピークは -1 dBTP に抑える)、ファイル名に付ける `name` を指定できる |
 | `queue_add` / `queue_list` / `queue_cancel` | レンダーキュー。`export` と同じ仕様を配列で積み、登録順に1つずつ書き出す(16:9 と 9:16 などをまとめて)。積んだらすぐ返るので、`queue_list` で状態を見る |
 | `list_history` / `restore_history` | 履歴(git)の一覧と巻き戻し(その作品だけ) |
+| `set_loop` / `relink_asset` | ループ範囲を決める。リンク切れの素材(get_diagnostics の `missingAssets`)を付け替える(作品の外のファイルは assets/ に写す) |
 | `get_ui_context` | 人がアプリで指し示しているもの(作品、フレーム、選んだクリップ、プレビュー上で Alt+ドラッグで囲んだ範囲)と画像 |
 
 スケッチのファイル(sketch.ts、shader.fs)は直接編集してかまいません。保存すると5秒後に履歴へ自動でコミットされ、MCPのツールで変えた分はツール呼び出しごとにコミットされます。

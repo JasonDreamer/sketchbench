@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-relink-pick"
+description = "Enables the relink_pick command without any pre-configured scope."
+commands.allow = ["relink_pick"]
+
+[[permission]]
+identifier = "deny-relink-pick"
+description = "Denies the relink_pick command without any pre-configured scope."
+commands.deny = ["relink_pick"]

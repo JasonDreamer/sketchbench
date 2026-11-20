@@ -46,6 +46,7 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 tauri-plugin-single-instance = "2"
 ebur128 = "0.1.11"
+tauri-plugin-dialog = "2"
 
 [profile.dev]
 opt-level = 1

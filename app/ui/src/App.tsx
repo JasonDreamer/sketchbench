@@ -74,6 +74,8 @@ export function App() {
   /** 書き出し中のジョブの進み具合(ジョブid → 描いたフレーム数) */
   /** プレビューキャッシュの揃っている区間 */
   const [cached, setCached] = createSignal<[number, number][]>([]);
+  /** project.json が参照しているのに見つからない素材 */
+  const [missing, setMissing] = createSignal<{ place: string; path: string; candidates: string[] }[]>([]);
   const [progress, setProgress] = createSignal<Record<string, number>>({});
 
   const refresh = async () => {
@@ -86,6 +88,7 @@ export function App() {
     setLogs(s.logs);
     setProject(s.project);
     setDecls(s.declarations ?? {});
+    setMissing(s.missingAssets ?? []);
   };
 
   const addLog = (l: Log) => {
@@ -201,9 +204,14 @@ export function App() {
     invoke<{ items: QueueItem[] }>("queue_list").then((q) => setQueue(q.items), () => {});
     const first: any = await invoke("get_state");
     await refresh();
-    // 起動時は --open で指定した作品か、一覧の先頭を開く(前回のワークスペースの復元はフェーズ4)
-    const initial = first.initialWork && works().includes(first.initialWork) ? first.initialWork : works()[0];
-    if (!work() && initial) await open(initial);
+    // 起動時は --open で指定した作品、なければ前回開いていた作品(と位置)、それもなければ一覧の先頭を開く
+    const last = first.session?.work && works().includes(first.session.work) ? first.session.work : null;
+    const initial = first.initialWork && works().includes(first.initialWork) ? first.initialWork : last ?? works()[0];
+    if (!work() && initial) {
+      await open(initial);
+      if (initial === last && first.session.frame > 0) seek(first.session.frame);
+    }
+    if (first.crashed) setStatus("前回は正常に終了しませんでした。最後に開いていた作品を開いています。変更はその都度保存され、「履歴」からも戻せます。");
 
     // 子WebViewはUIの上に重なる別のネイティブ領域なので、プレビュー領域の矩形をRustへ送って合わせる。
     // ウィンドウのリサイズ中は位置合わせが1〜2フレーム遅れて隙間が見えるため隠す(フェーズ0の結果)
@@ -447,6 +455,28 @@ export function App() {
         <ExportState exp={exp()} />
         <button onClick={openExport} disabled={!work()}>書き出し</button>
         <button onClick={() => openDialog(queueDialog)} title="書き出しの順番待ちと結果">キュー{pending() ? `(${pending()})` : ""}</button>
+        <Show when={missing().length > 0}>
+          <div class="missing" role="alert">
+            <For each={missing()}>
+              {(m) => (
+                <div>
+                  見つからない素材: <b>{m.path}</b>({m.place})
+                  <For each={m.candidates}>
+                    {(c) => <button onClick={() => edit({ op: "relinkAsset", from: m.path, to: c })} title="作品の中の同じ名前のファイルに付け替える">{c} に付け替える</button>}
+                  </For>
+                  <button onClick={async () => {
+                    try {
+                      const r: any = await invoke("relink_pick", { from: m.path });
+                      if (r?.to) await edit({ op: "relinkAsset", from: m.path, to: r.to });
+                    } catch (e) {
+                      fail(e);
+                    }
+                  }} title="選んだファイルを作品の assets/ に写して付け替える">ファイルを選ぶ</button>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
       </div>
       <div class="preview" ref={previewEl}>
         <Show when={still()}>{(u) => <img class="still" src={u()} alt="" />}</Show>

@@ -217,6 +217,15 @@ pub struct SetLayersArg {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct RelinkArg {
+    pub work: String,
+    /// 見つからない素材の、今の参照(get_diagnostics の missingAssets の path)
+    pub from: String,
+    /// 新しい場所。作品からの相対パスか、作品の外の絶対パス(作品の assets/ に写してから付け替える)
+    pub to: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SetLoopArg {
     pub work: String,
     /// ループ範囲の開始と終了(作品のフレーム、[start, end))。両方省略で外す
@@ -548,6 +557,29 @@ impl Tools {
     async fn update_layer(&self, Parameters(a): Parameters<UpdateLayerArg>) -> Result<CallToolResult, ErrorData> {
         match self.apply(&a.work, edit::Op::UpdateLayer { layer: a.layer, set: a.set }) {
             Ok(_) => ok_json(json!({ "ok": true })),
+            Err(e) => fail(e),
+        }
+    }
+
+    #[tool(description = "リンク切れの素材(get_diagnostics の missingAssets)を別のファイルに付け替える")]
+    async fn relink_asset(&self, Parameters(a): Parameters<RelinkArg>) -> Result<CallToolResult, ErrorData> {
+        let dir = match self.dir(&a.work) {
+            Ok(d) => d,
+            Err(e) => return fail(e),
+        };
+        let p = std::path::Path::new(&a.to);
+        let to = if p.is_absolute() {
+            match crate::assets_check::import_file(&dir, p) {
+                Ok(t) => t,
+                Err(e) => return fail(e),
+            }
+        } else if crate::workspace::safe_rel(&dir, &a.to).is_some_and(|f| f.is_file()) {
+            a.to.clone()
+        } else {
+            return fail(format!("{} が作品の中にない", a.to));
+        };
+        match self.apply(&a.work, edit::Op::RelinkAsset { from: a.from, to: to.clone() }) {
+            Ok(_) => ok_json(json!({ "ok": true, "to": to })),
             Err(e) => fail(e),
         }
     }

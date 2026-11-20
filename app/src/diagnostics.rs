@@ -78,6 +78,8 @@ pub fn collect(core: &Arc<Core>, work: &str, dir: &Path) -> Value {
         "compile": compile,
         "types": typecheck(&core.ws, work),
         "projectJson": crate::schema::validate(dir),
+        // project.json が参照しているのに見つからない素材(候補は作品フォルダ内の同じ名前のファイル)
+        "missingAssets": crate::assets_check::missing(dir),
         "runtime": runtime,
         "frameTimeMs": stats,
         "note": "runtime はプレビュー(この作品を開いているとき)と直近の描画のログ。直したあとは render_frames で描き直して確かめる",

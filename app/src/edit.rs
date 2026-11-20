@@ -48,6 +48,9 @@ pub enum Op {
     /// キーフレームを丸ごと置き換える(MCPの set_keyframes)。空にすると value だけが残る
     #[serde(rename_all = "camelCase")]
     SetKeys { target: KeyTarget, keys: Vec<Value> },
+    /// project.json の中の素材の参照を from から to に付け替える(リンク切れの再リンク)
+    #[serde(rename_all = "camelCase")]
+    RelinkAsset { from: String, to: String },
     /// ループ範囲を決める(両方 null で外す)
     #[serde(rename_all = "camelCase")]
     SetLoop { start: Option<u64>, end: Option<u64> },
@@ -158,6 +161,7 @@ impl Op {
             Op::SetLayers { layers } => format!("レイヤー構成を{}個に置き換え", layers.len()),
             Op::UpdateLayer { layer, set } => format!("{layer} の{}を変更", set.keys().map(|k| k.as_str()).collect::<Vec<_>>().join("・")),
             Op::MoveLayer { layer, .. } => format!("{layer} の重ね順を変更"),
+            Op::RelinkAsset { from, to } => format!("素材 {from} を {to} に付け替え"),
             Op::SetLoop { start: None, end: None } => "ループ範囲を外す".into(),
             Op::SetLoop { .. } => "ループ範囲を変更".into(),
             Op::DeleteLayer { layer } => format!("{layer} を削除"),
@@ -355,6 +359,11 @@ impl Editor {
                     } else {
                         l.insert(k, val);
                     }
+                }
+            }
+            Op::RelinkAsset { from, to } => {
+                if crate::assets_check::relink(&mut v, &from, &to) == 0 {
+                    return Err(format!("{from} を参照しているところがない"));
                 }
             }
             Op::SetLoop { start, end } => {

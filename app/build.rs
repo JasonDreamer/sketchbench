@@ -15,6 +15,7 @@ const COMMANDS: &[&str] = &[
     "queue_clear",
     "measure_loudness",
     "render_stills",
+    "relink_pick",
     "edit_project",
     "undo",
     "redo",

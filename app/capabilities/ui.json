@@ -20,6 +20,7 @@
     "allow-queue-clear",
     "allow-measure-loudness",
     "allow-render-stills",
+    "allow-relink-pick",
     "allow-edit-project",
     "allow-undo",
     "allow-redo",

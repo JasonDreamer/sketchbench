@@ -110,3 +110,6 @@ dialog form { display: grid; gap: 8px; min-width: 320px; }
 .seam img { width: 100%; display: block; background: #000; border-radius: var(--radius); }
 .seam figcaption { color: var(--muted); font-size: 12px; padding-top: 2px; }
 .seam .hint { padding: 0; }
+.bar .missing { flex-basis: 100%; display: grid; gap: 4px; color: var(--warn); }
+.bar .missing div { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.bar .missing b { color: var(--text); font-weight: 600; }
