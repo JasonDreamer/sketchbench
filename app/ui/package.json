@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "sliced-areas": "^2.1.1",
     "solid-js": "1.9.18",
     "tweakpane": "^4.0.5"
   },

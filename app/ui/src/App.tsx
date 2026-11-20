@@ -4,6 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { Timeline, type Selection, type TimelineApi } from "./Timeline";
 import { isNtsc, smpte, type ProjectLike, type TimeDisplay } from "./timeline-model";
 import { SeamView } from "./SeamView";
+import { Areas, type AreasApi } from "./Areas";
+import { EDITOR_NAMES, loadWorkspaces, saveAsDefault, saveWorkspaces, type EditorTag, type WorkspaceSet } from "./workspaces";
+import type { AreasLayout } from "sliced-areas";
 import { ParamPanel, type ParamApi } from "./ParamPanel";
 import { ExportForm, QueueList, type QueueItem } from "./ExportUi";
 
@@ -48,7 +51,8 @@ export function App() {
     } else {
       covered = Math.max(0, covered - 1);
       if (covered > 0) return;
-      invoke("set_preview_hidden", { hidden: false });
+      // プレビューのエリアがないワークスペースでは隠したまま
+      invoke("set_preview_hidden", { hidden: !previewEl() });
       setStill((old) => {
         if (old) URL.revokeObjectURL(old);
         return null;
@@ -62,8 +66,49 @@ export function App() {
   };
   let timeline: TimelineApi | null = null;
   let params: ParamApi | null = null;
-  let previewEl!: HTMLDivElement;
-  let consoleEl!: HTMLDivElement;
+  /** プレビューを出しているエリアの要素(プレビューの子WebViewは1つなので、最初に開いたエリアだけが持つ) */
+  const [previewEl, setPreviewEl] = createSignal<HTMLDivElement | null>(null);
+  let areas: AreasApi | null = null;
+  /** ワークスペース(作品ごと)。layoutNow は切り替えたときだけ変える(ドラッグのたびに配置を入れ直さない) */
+  const [wsSet, setWsSet] = createSignal<WorkspaceSet>(loadWorkspaces(null));
+  const [layoutNow, setLayoutNow] = createSignal<AreasLayout>(wsSet().list[wsSet().active].layout);
+  const switchWorkspace = (i: number) => {
+    const ws = { ...wsSet(), active: i };
+    setWsSet(ws);
+    saveWorkspaces(work(), ws);
+    setLayoutNow(ws.list[i].layout);
+  };
+  const changeLayout = (layout: AreasLayout) => {
+    const ws = wsSet();
+    const list = ws.list.map((w, i) => (i === ws.active ? { ...w, layout } : w));
+    setWsSet({ ...ws, list });
+    saveWorkspaces(work(), { ...ws, list });
+  };
+  const addWorkspace = () => {
+    const ws = wsSet();
+    const name = prompt("新しいワークスペースの名前(今の配置を写して作る)", `${ws.list[ws.active].name} 2`);
+    if (!name) return;
+    const list = [...ws.list, { name, layout: structuredClone(ws.list[ws.active].layout) }];
+    setWsSet({ ...ws, list });
+    switchWorkspace(list.length - 1);
+  };
+  const renameWorkspace = (i: number) => {
+    const ws = wsSet();
+    const name = prompt("ワークスペースの名前", ws.list[i].name);
+    if (!name) return;
+    const next = { ...ws, list: ws.list.map((w, k) => (k === i ? { ...w, name } : w)) };
+    setWsSet(next);
+    saveWorkspaces(work(), next);
+  };
+  const removeWorkspace = (i: number) => {
+    const ws = wsSet();
+    if (ws.list.length <= 1 || !confirm(`ワークスペース「${ws.list[i].name}」を消しますか`)) return;
+    const list = ws.list.filter((_, k) => k !== i);
+    const active = Math.min(ws.active > i ? ws.active - 1 : ws.active, list.length - 1);
+    setWsSet({ active, list });
+    saveWorkspaces(work(), { active, list });
+    setLayoutNow(list[active].layout);
+  };
   let newDialog!: HTMLDialogElement;
   let bulkDialog!: HTMLDialogElement;
   let layerDialog!: HTMLDialogElement;
@@ -93,7 +138,7 @@ export function App() {
 
   const addLog = (l: Log) => {
     setLogs((v) => [...v.slice(-300), l]);
-    queueMicrotask(() => (consoleEl.scrollTop = consoleEl.scrollHeight));
+    queueMicrotask(() => document.querySelectorAll<HTMLElement>(".console").forEach((c) => (c.scrollTop = c.scrollHeight)));
   };
   const fail = (e: unknown) => addLog({ source: "ui", level: "error", message: String(e), unixMs: Date.now() });
 
@@ -165,7 +210,9 @@ export function App() {
   };
 
   const reportRect = () => {
-    const r = previewEl.getBoundingClientRect();
+    const el = previewEl();
+    if (!el) return;
+    const r = el.getBoundingClientRect();
     invoke("set_preview_rect", { rect: { x: r.x, y: r.y, w: r.width, h: r.height } });
   };
 
@@ -213,25 +260,6 @@ export function App() {
     }
     if (first.crashed) setStatus("前回は正常に終了しませんでした。最後に開いていた作品を開いています。変更はその都度保存され、「履歴」からも戻せます。");
 
-    // 子WebViewはUIの上に重なる別のネイティブ領域なので、プレビュー領域の矩形をRustへ送って合わせる。
-    // ウィンドウのリサイズ中は位置合わせが1〜2フレーム遅れて隙間が見えるため隠す(フェーズ0の結果)
-    let resizeTimer = 0;
-    let hidden = false;
-    const ro = new ResizeObserver(() => {
-      reportRect();
-      if (!hidden) {
-        hidden = true;
-        coverPreview(true);
-      }
-      clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(() => {
-        hidden = false;
-        reportRect();
-        coverPreview(false);
-      }, 150);
-    });
-    ro.observe(previewEl);
-    reportRect();
 
     let raf = 0;
     const loop = () => {
@@ -243,6 +271,11 @@ export function App() {
 
     // ショートカット。プレビュー(別のWebView)で押されたキーもRust経由でここに届く
     const shortcut = (k: KeyMsg) => {
+      // Ctrl+Space: カーソル下のエリアを最大化・復帰(Blenderと同じ)
+      if (k.ctrl && (k.code === "Space" || k.key === " ")) {
+        areas?.toggleMaximize();
+        return true;
+      }
       if (params?.key(k)) return true;
       if (timeline?.key(k)) return true;
       if (k.ctrl && (k.key === "z" || k.key === "Z")) {
@@ -267,9 +300,47 @@ export function App() {
     onCleanup(unKey);
   });
 
+  // 子WebViewはUIの上に重なる別のネイティブ領域なので、プレビューのエリアの矩形をRustへ送って合わせる。
+  // 大きさが変わっている間は位置合わせが1〜2フレーム遅れて隙間が見えるため隠す(フェーズ0の結果)。
+  // プレビューのエリアがなければ隠す
+  createEffect(() => {
+    const el = previewEl();
+    if (!el) {
+      invoke("set_preview_hidden", { hidden: true }).catch(() => {});
+      return;
+    }
+    if (covered === 0) invoke("set_preview_hidden", { hidden: false }).catch(() => {});
+    let resizeTimer = 0;
+    let hidden = false;
+    const ro = new ResizeObserver(() => {
+      reportRect();
+      if (!hidden) {
+        hidden = true;
+        coverPreview(true);
+      }
+      clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        hidden = false;
+        reportRect();
+        coverPreview(false);
+      }, 150);
+    });
+    ro.observe(el);
+    reportRect();
+    onCleanup(() => {
+      ro.disconnect();
+      clearTimeout(resizeTimer);
+    });
+  });
+
   const open = async (w: string) => {
     try {
       await invoke("open_work", { work: w });
+      // 作品ごとのワークスペース
+      const ws = loadWorkspaces(w);
+      setWsSet(ws);
+      setLayoutNow(ws.list[ws.active].layout);
+      loadHistory();
       setCached([]);
       setSelection(null);
       await refresh();
@@ -317,14 +388,16 @@ export function App() {
     else invoke("set_ui_context", { context: { playing: true } }).catch(() => {});
   });
 
-  const openHistory = async () => {
+  const loadHistory = async () => {
     try {
       const r: any = await invoke("list_history");
       setHistory(r.history);
     } catch (e) {
-      fail(e);
       setHistory([]);
     }
+  };
+  const openHistory = async () => {
+    await loadHistory();
     if (!historyDialog.open) openDialog(historyDialog);
   };
 
@@ -332,8 +405,9 @@ export function App() {
     try {
       await invoke("restore_history", { commit });
       setStatus(`${commit} の状態に戻した(戻す前の状態も履歴に残っている)`);
-      historyDialog.close();
+      if (historyDialog.open) historyDialog.close();
       await refresh();
+      loadHistory();
     } catch (e) {
       fail(e);
     }
@@ -413,6 +487,102 @@ export function App() {
     await edit({ op: "addClips", layer, track, clips });
   };
 
+  const historyList = () => (
+    <Show when={history().length > 0} fallback={<p class="hint">まだ履歴がありません。変更すると自動でコミットされます(MCPはツール呼び出しごと、直接の編集とUIの操作は5秒止まったら)。</p>}>
+      <ul>
+        <For each={history()}>
+          {(h) => (
+            <li>
+              <Show when={h.thumb} fallback={<div class="thumb empty" />}>
+                <img class="thumb" src={`http://sb.localhost${h.thumb}`} alt="" loading="lazy" />
+              </Show>
+              <div class="meta">
+                <div>{h.message.replace(/^[^:]+: /, "")}</div>
+                <div class="hint">{h.commit} ・ {h.author} ・ {new Date(h.date).toLocaleString()}</div>
+              </div>
+              <button onClick={() => restore(h.commit)}>この状態に戻す</button>
+            </li>
+          )}
+        </For>
+      </ul>
+    </Show>
+  );
+
+  /** エリアに置くエディタ(エリアの左上のメニューで選ぶ) */
+  const editorFor = (tag: EditorTag) => {
+    switch (tag) {
+      case "preview":
+        return <PreviewPane />;
+      case "timeline":
+        return (
+          <div class="timeline-wrap">
+            <Show when={project() && work()} fallback={<div class="hint">作品を開くとタイムラインが出ます。</div>}>
+              <Timeline work={work()!} project={project()!} decls={decls()} frame={currentFrame} playing={() => time().playing} cached={cached}
+                selection={selection} select={setSelection} seek={(f, scrub) => seek(f, scrub)} edit={edit} status={setStatus} api={(a) => (timeline = a)} />
+            </Show>
+          </div>
+        );
+      case "params":
+        return (
+          <div class="side">
+            <Show when={project()}>
+              {(p) => <ParamPanel project={p()} decls={decls()} frame={currentFrame} edit={edit} status={setStatus} api={(a) => (params = a)} />}
+            </Show>
+            <Inspector item={selectedClip()} edit={edit} />
+          </div>
+        );
+      case "console":
+        return (
+          <div class="console" aria-live="polite">
+            <Show when={logs().length === 0}><div class="row src">ログはまだありません。スケッチの変換エラーや実行時の例外はここに出ます。</div></Show>
+            <For each={logs()}>{(l) => <div class={`row ${l.level}`}><span class="src">{l.source}</span>{l.message}</div>}</For>
+          </div>
+        );
+      case "history":
+        loadHistory();
+        return <div class="history pane">{historyList()}</div>;
+      case "export":
+        return (
+          <div class="pane">
+            <div class="actions" style={{ "justify-content": "flex-start" }}>
+              <button onClick={openExport} disabled={!work()}>書き出しの設定</button>
+            </div>
+            <QueueList items={queue()} progress={progress()} close={() => {}} fail={fail} />
+          </div>
+        );
+      default:
+        return <div class="hint">{EDITOR_NAMES[tag]}は次の段階で入れます。</div>;
+    }
+  };
+
+  /** プレビューのエリア。子WebViewは1つなので、2つ目からは案内だけ出す */
+  function PreviewPane() {
+    let el!: HTMLDivElement;
+    const [mine, setMine] = createSignal(false);
+    onMount(() => {
+      if (!previewEl()) {
+        setPreviewEl(el);
+        setMine(true);
+      }
+    });
+    onCleanup(() => {
+      if (previewEl() === el) setPreviewEl(null);
+    });
+    return (
+      <div class="preview" ref={el}>
+        <Show when={mine()} fallback={<div class="empty">プレビューはほかのエリアに出ています(プレビューは1つだけ置けます)。</div>}>
+          <Show when={still()}>{(u) => <img class="still" src={u()} alt="" />}</Show>
+          <Show when={!work()}>
+            <div class="empty">
+              作品がありません。「新規」でテンプレートから作るか、<br />
+              {workspace()}\works\ にフォルダを置いてください。
+            </div>
+          </Show>
+        </Show>
+      </div>
+    );
+  }
+
   return (
     <div class="app">
       <div class="bar">
@@ -478,48 +648,21 @@ export function App() {
           </div>
         </Show>
       </div>
-      <div class="preview" ref={previewEl}>
-        <Show when={still()}>{(u) => <img class="still" src={u()} alt="" />}</Show>
-        <Show when={!work()}>
-          <div class="empty">
-            作品がありません。「新規」でテンプレートから作るか、<br />
-            {workspace()}\works\ にフォルダを置いてください。
-          </div>
-        </Show>
-      </div>
-      <div class="lower">
-        <div class="timeline-wrap">
-          <Show when={project() && work()} fallback={<div class="hint">作品を開くとタイムラインが出ます。</div>}>
-            <Timeline
-              work={work()!}
-              project={project()!}
-              decls={decls()}
-              frame={currentFrame}
-              playing={() => time().playing}
-              cached={cached}
-              selection={selection}
-              select={setSelection}
-              seek={(f, scrub) => seek(f, scrub)}
-              edit={edit}
-              status={setStatus}
-              api={(a) => (timeline = a)}
-            />
-          </Show>
-          <div class="status" aria-live="polite">{status() || "クリック: シーク / ダブルクリック: クリップやマーカーを追加 / ドラッグ: 移動・伸縮(Shiftで吸着なし) / S: 分割 / Delete: 削除 / B・N: ループの開始・終了 / Ctrl+Z: 取り消し / ホイール: 拡大縮小"}</div>
-        </div>
-        <div class="side">
-          <Show when={project()}>
-            {(p) => <ParamPanel project={p()} decls={decls()} frame={currentFrame} edit={edit} status={setStatus} api={(a) => (params = a)} />}
-          </Show>
-          <Inspector item={selectedClip()} edit={edit} />
-        </div>
-      </div>
-      <div class="console" ref={consoleEl} aria-live="polite">
-        <Show when={logs().length === 0}><div class="row src">ログはまだありません。スケッチの変換エラーや実行時の例外はここに出ます。</div></Show>
-        <For each={logs()}>
-          {(l) => <div class={`row ${l.level}`}><span class="src">{l.source}</span>{l.message}</div>}
+      <div class="ws-tabs" role="tablist" aria-label="ワークスペース">
+        <For each={wsSet().list}>
+          {(w, i) => (
+            <button role="tab" aria-selected={i() === wsSet().active} class={i() === wsSet().active ? "on" : ""}
+              onClick={() => switchWorkspace(i())} onDblClick={() => renameWorkspace(i())}
+              onContextMenu={(e) => { e.preventDefault(); removeWorkspace(i()); }}
+              title="クリックで切り替え / ダブルクリックで名前を変える / 右クリックで消す">{w.name}</button>
+          )}
         </For>
+        <button onClick={addWorkspace} title="今の配置を写して新しいワークスペースを作る" aria-label="ワークスペースを足す">+</button>
+        <span class="spacer" />
+        <button onClick={() => { saveAsDefault(wsSet()); setStatus("今のワークスペースを、新しく開く作品の初期設定にした"); }} title="新しく開く作品の既定の配置にする">初期設定として保存</button>
       </div>
+      <Areas layout={layoutNow} onChange={changeLayout} editor={editorFor} cover={coverPreview} api={(a) => (areas = a)} />
+      <div class="status" aria-live="polite">{status() || "クリック: シーク / ダブルクリック: クリップやマーカーを追加 / ドラッグ: 移動・伸縮(Shiftで吸着なし) / S: 分割 / Delete: 削除 / B・N: ループの開始・終了 / Ctrl+Space: エリアの最大化 / Ctrl+Z: 取り消し / ホイール: 拡大縮小"}</div>
       <dialog ref={newDialog}>
         <form onSubmit={create}>
           <label>テンプレート
@@ -577,24 +720,7 @@ export function App() {
       <dialog ref={historyDialog}>
         <div class="history">
           <h3>履歴({work()})</h3>
-          <Show when={history().length > 0} fallback={<p class="hint">まだ履歴がありません。変更すると自動でコミットされます(MCPはツール呼び出しごと、直接の編集とUIの操作は5秒止まったら)。</p>}>
-            <ul>
-              <For each={history()}>
-                {(h) => (
-                  <li>
-                    <Show when={h.thumb} fallback={<div class="thumb empty" />}>
-                      <img class="thumb" src={`http://sb.localhost${h.thumb}`} alt="" loading="lazy" />
-                    </Show>
-                    <div class="meta">
-                      <div>{h.message.replace(/^[^:]+: /, "")}</div>
-                      <div class="hint">{h.commit} ・ {h.author} ・ {new Date(h.date).toLocaleString()}</div>
-                    </div>
-                    <button onClick={() => restore(h.commit)}>この状態に戻す</button>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </Show>
+          {historyList()}
           <div class="actions"><button onClick={() => historyDialog.close()}>閉じる</button></div>
         </div>
       </dialog>

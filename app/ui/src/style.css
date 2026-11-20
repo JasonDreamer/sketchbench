@@ -23,7 +23,7 @@ button:hover:not(:disabled) { border-color: var(--muted); }
 button:disabled { opacity: 0.5; }
 button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.app { display: grid; grid-template-rows: auto minmax(160px, 1fr) auto 110px; height: 100%; }
+.app { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; height: 100%; }
 .bar { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
 .bar .spacer { flex: 1; }
 .bar .time { font-variant-numeric: tabular-nums; min-width: 190px; color: var(--muted); }
@@ -113,3 +113,26 @@ dialog form { display: grid; gap: 8px; min-width: 320px; }
 .bar .missing { flex-basis: 100%; display: grid; gap: 4px; color: var(--warn); }
 .bar .missing div { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .bar .missing b { color: var(--text); font-weight: 600; }
+/* ワークスペースのタブ */
+.ws-tabs { display: flex; gap: 2px; align-items: center; padding: 2px 8px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.ws-tabs button { border-color: transparent; background: transparent; color: var(--muted); padding: 2px 10px; }
+.ws-tabs button.on { color: var(--text); border-color: var(--line); background: var(--panel); }
+.ws-tabs .spacer { flex: 1; }
+/* エリア(sliced-areas の見た目を、角の小さい平らな面に揃える) */
+.areas { min-height: 0; height: 100%; }
+.areas .sliced-areas-root { background: var(--bg); background-image: none; }
+.areas .sliced-areas-area { border-radius: var(--radius); background: var(--panel); border-color: var(--line); box-shadow: none; }
+.areas .sliced-areas-area:hover { border-color: var(--muted); box-shadow: none; }
+.area { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.area-head { flex: none; display: flex; align-items: center; height: 24px; padding: 0 4px; border-bottom: 1px solid var(--line); }
+.area-head select { padding: 0 4px; font-size: 12px; border-color: transparent; background: transparent; color: var(--muted); }
+.area-head select:hover { border-color: var(--line); color: var(--text); }
+.area-body { flex: 1; min-height: 0; min-width: 0; overflow: auto; position: relative; display: flex; flex-direction: column; }
+.area-body > * { flex: 1; min-height: 0; }
+.area-body .preview { height: 100%; }
+.area-body .side { border-left: 0; }
+.area-body .console { border-top: 0; }
+.pane { padding: 8px; display: grid; align-content: start; gap: 8px; }
+.pane .queue { min-width: 0; max-height: none; }
+.history.pane { min-width: 0; max-height: none; }
+.status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
