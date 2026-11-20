@@ -226,6 +226,36 @@ pub struct RelinkArg {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SetProjectArg {
+    pub work: String,
+    /// 出力の大きさ(ピクセル)
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// fps [分子, 分母](29.97 は [30000, 1001])
+    pub fps: Option<[u32; 2]>,
+    /// 尺(フレーム)。尺いっぱいだったレイヤーは新しい尺まで伸びる
+    pub duration: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetTimingArg {
+    pub work: String,
+    /// BPM(省略で今のまま、0 で外す)
+    pub bpm: Option<f64>,
+    /// 拍0(小節の頭)のフレーム
+    pub beat_offset: Option<i64>,
+    /// マーカーを丸ごと置き換える [{ name, start, end? }](フレーム)。省略すると今のまま
+    pub markers: Option<Vec<Value>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetAudioArg {
+    pub work: String,
+    /// 音声トラック [{ asset: "assets/song.wav", offset?: フレーム, gain?: 倍率 }]。丸ごと置き換える
+    pub audio: Vec<Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SetLoopArg {
     pub work: String,
     /// ループ範囲の開始と終了(作品のフレーム、[start, end))。両方省略で外す
@@ -583,6 +613,44 @@ impl Tools {
         };
         match self.apply(&a.work, edit::Op::RelinkAsset { from: a.from, to: to.clone() }) {
             Ok(_) => ok_json(json!({ "ok": true, "to": to })),
+            Err(e) => fail(e),
+        }
+    }
+
+    #[tool(description = "作品の大きさ・fps・尺を変える")]
+    async fn set_project(&self, Parameters(a): Parameters<SetProjectArg>) -> Result<CallToolResult, ErrorData> {
+        match self.apply(&a.work, edit::Op::SetSettings { width: a.width, height: a.height, fps: a.fps, duration: a.duration }) {
+            Ok(_) => ok_json(json!({ "ok": true })),
+            Err(e) => fail(e),
+        }
+    }
+
+    #[tool(description = "BPM・拍0のフレーム・マーカー(区間)を決める。スケッチの beats(t) と section(名前, t) が使う")]
+    async fn set_timing(&self, Parameters(a): Parameters<SetTimingArg>) -> Result<CallToolResult, ErrorData> {
+        if a.bpm.is_some() || a.beat_offset.is_some() {
+            // 省略した BPM は今の値のまま(SetTempo は bpm なしで外す操作なので、今の値を入れて送る)
+            let cur = self.dir(&a.work).ok().and_then(|d| crate::workspace::read_project(&d).ok()).and_then(|p| p.rest.get("bpm").and_then(|b| b.as_f64()));
+            let bpm = match a.bpm {
+                Some(b) if b <= 0.0 => None,
+                Some(b) => Some(b),
+                None => cur,
+            };
+            if let Err(e) = self.apply(&a.work, edit::Op::SetTempo { bpm, beat_offset: a.beat_offset }) {
+                return fail(e);
+            }
+        }
+        if let Some(m) = a.markers {
+            if let Err(e) = self.apply(&a.work, edit::Op::SetMarkers { markers: m }) {
+                return fail(e);
+            }
+        }
+        ok_json(json!({ "ok": true }))
+    }
+
+    #[tool(description = "音声トラックを置き換える(再生と書き出しのミックスに入る。スケッチの解析は assets.audio で読む)")]
+    async fn set_audio(&self, Parameters(a): Parameters<SetAudioArg>) -> Result<CallToolResult, ErrorData> {
+        match self.apply(&a.work, edit::Op::SetAudio { audio: a.audio }) {
+            Ok(_) => ok_json(json!({ "ok": true })),
             Err(e) => fail(e),
         }
     }

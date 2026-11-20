@@ -57,6 +57,8 @@ pub fn collect(core: &Arc<Core>, work: &str, dir: &Path) -> Value {
     let open = core.work.lock().unwrap().clone();
     let last_render = core.last_render.lock().unwrap().get(work).cloned();
     let since = *core.last_reload_ms.lock().unwrap();
+    // 前の作品のプレビュー(作り直す前のもの)のログが後から届くことがあるので、今のプレビューのものだけ
+    let preview = core.preview_label.lock().unwrap().clone();
     let runtime: Vec<Value> = logs
         .iter()
         .rev()
@@ -64,7 +66,7 @@ pub fn collect(core: &Arc<Core>, work: &str, dir: &Path) -> Value {
         // この作品の最後の描画と、プレビュー(開いているとき)の最後の読み込み以降だけ
         .filter(|l| {
             let s = l["source"].as_str().unwrap_or("");
-            Some(s) == last_render.as_deref() || (open.as_deref() == Some(work) && s.starts_with("preview-") && l["unixMs"].as_f64().unwrap_or(0.0) >= since)
+            Some(s) == last_render.as_deref() || (open.as_deref() == Some(work) && s == preview && l["unixMs"].as_f64().unwrap_or(0.0) >= since)
         })
         .take(20)
         .map(|l| json!({ "level": l["level"], "source": l["source"], "message": l["message"] }))

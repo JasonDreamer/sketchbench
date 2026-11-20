@@ -5,7 +5,7 @@
 
 ## 進め方
 - `docs/design.md` の「開発フェーズ」の順に作る。各フェーズの完了条件を満たすまで次へ進まない。
-- フェーズ3(AIが自分で確認できる)まで完了(結果は design.md の開発フェーズ)。次はフェーズ4(制作ソフトとしての基盤)。フェーズ0の結果は `docs/phase0-results.md`、試作は `phase0/`(本体からは参照しない)。
+- フェーズ4(制作ソフトとしての基盤)まで完了条件を満たした(結果は design.md の開発フェーズ)。次はフェーズ5(合成と拡張)。フェーズ4の残り(自己更新は配布先が決まってから、ディスクのキャッシュ、プレビュー解像度)は design.md のフェーズ4の記録にある。フェーズ0の結果は `docs/phase0-results.md`、試作は `phase0/`(本体からは参照しない)。
 - アプリ本体は `app/`(Rustコア、`app/ui` がUI)、ランタイムは `packages/runtime`(`@sketchbench/runtime`)。ランタイムのTSはRustコアがOxcで変換して配信する。
 - 開発中の作業フォルダは環境変数 `SB_WORKSPACE` で指定する(既定は `%USERPROFILE%\Documents\Sketchbench`)。リポジトリ内で試すときは `.dev-workspace/`(gitに入れない)を使う。
 

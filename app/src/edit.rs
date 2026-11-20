@@ -48,6 +48,9 @@ pub enum Op {
     /// キーフレームを丸ごと置き換える(MCPの set_keyframes)。空にすると value だけが残る
     #[serde(rename_all = "camelCase")]
     SetKeys { target: KeyTarget, keys: Vec<Value> },
+    /// 作品の大きさ・fps・尺を変える(省略したものはそのまま)
+    #[serde(rename_all = "camelCase")]
+    SetSettings { width: Option<u32>, height: Option<u32>, fps: Option<[u32; 2]>, duration: Option<u64> },
     /// 音声トラックの一覧を置き換える([{ asset, offset?, gain? }])
     #[serde(rename_all = "camelCase")]
     SetAudio { audio: Vec<Value> },
@@ -166,6 +169,7 @@ impl Op {
             Op::MoveLayer { layer, .. } => format!("{layer} の重ね順を変更"),
             Op::RelinkAsset { from, to } => format!("素材 {from} を {to} に付け替え"),
             Op::SetAudio { audio } => format!("音声トラックを{}本に", audio.len()),
+            Op::SetSettings { .. } => "作品の設定を変更".into(),
             Op::SetLoop { start: None, end: None } => "ループ範囲を外す".into(),
             Op::SetLoop { .. } => "ループ範囲を変更".into(),
             Op::DeleteLayer { layer } => format!("{layer} を削除"),
@@ -362,6 +366,34 @@ impl Editor {
                         l.remove(&k);
                     } else {
                         l.insert(k, val);
+                    }
+                }
+            }
+            Op::SetSettings { width, height, fps, duration } => {
+                if let Some(w) = width {
+                    v["width"] = json!(w);
+                }
+                if let Some(h) = height {
+                    v["height"] = json!(h);
+                }
+                if let Some(f) = fps {
+                    if f[0] == 0 || f[1] == 0 {
+                        return Err("fps は [分子, 分母] の正の整数".into());
+                    }
+                    v["fps"] = json!(f);
+                }
+                if let Some(d) = duration {
+                    if d == 0 {
+                        return Err("尺は1フレーム以上".into());
+                    }
+                    let old = v["duration"].as_u64().unwrap_or(d);
+                    v["duration"] = json!(d);
+                    // 尺いっぱいだったレイヤーは新しい尺まで伸ばし、尺を越えるものは詰める
+                    for l in v["layers"].as_array_mut().into_iter().flatten() {
+                        match l["end"].as_u64() {
+                            Some(e) if e == old || e > d => l["end"] = json!(d),
+                            _ => {}
+                        }
                     }
                 }
             }
