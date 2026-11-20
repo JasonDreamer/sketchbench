@@ -136,3 +136,12 @@ dialog form { display: grid; gap: 8px; min-width: 320px; }
 .pane .queue { min-width: 0; max-height: none; }
 .history.pane { min-width: 0; max-height: none; }
 .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* コードエディタ */
+.code { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.code-bar { flex: none; display: flex; gap: 6px; align-items: center; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.code-bar select { max-width: 60%; }
+.code-note { flex: none; display: flex; gap: 8px; align-items: center; padding: 4px 8px; color: var(--warn); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.code-host { flex: 1; min-height: 0; }
+.code-host .cm-editor { height: 100%; font-size: 13px; }
+.code-host .cm-scroller { font-family: "Cascadia Mono", Consolas, monospace; }
+.cm-changed-line { background: rgba(127, 224, 176, 0.12); }

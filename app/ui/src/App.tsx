@@ -5,6 +5,7 @@ import { Timeline, type Selection, type TimelineApi } from "./Timeline";
 import { isNtsc, smpte, type ProjectLike, type TimeDisplay } from "./timeline-model";
 import { SeamView } from "./SeamView";
 import { Areas, type AreasApi } from "./Areas";
+import { CodeEditor } from "./CodeEditor";
 import { EDITOR_NAMES, loadWorkspaces, saveAsDefault, saveWorkspaces, type EditorTag, type WorkspaceSet } from "./workspaces";
 import type { AreasLayout } from "sliced-areas";
 import { ParamPanel, type ParamApi } from "./ParamPanel";
@@ -291,7 +292,7 @@ export function App() {
       return true;
     };
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("input, select, textarea, dialog")) return;
+      if ((e.target as HTMLElement).closest("input, select, textarea, dialog, .cm-editor")) return;
       if (shortcut({ code: e.code, key: e.key, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey })) e.preventDefault();
     };
     addEventListener("keydown", onKey);
@@ -549,6 +550,12 @@ export function App() {
             </div>
             <QueueList items={queue()} progress={progress()} close={() => {}} fail={fail} />
           </div>
+        );
+      case "code":
+        return (
+          <Show when={work()} keyed fallback={<div class="hint">作品を開くとコードを編集できます。</div>}>
+            {(w) => <CodeEditor work={w} preferred={project()?.layers[0]?.sketch} status={setStatus} fail={fail} />}
+          </Show>
         );
       default:
         return <div class="hint">{EDITOR_NAMES[tag]}は次の段階で入れます。</div>;

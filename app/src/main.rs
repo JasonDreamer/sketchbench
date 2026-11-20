@@ -17,6 +17,7 @@ mod midi_live;
 mod player;
 mod queue;
 mod session;
+mod lsp;
 mod assets_check;
 mod schema;
 mod scheme;
@@ -168,6 +169,67 @@ async fn relink_pick(app: AppHandle, from: String) -> CmdResult {
     let src = fp.into_path().map_err(|e| e.to_string())?;
     let to = assets_check::import_file(&dir, &src)?;
     Ok(json!({ "to": to }))
+}
+
+/// 言語サーバーを(動いていなければ)起動し、作業フォルダのURIを返す
+#[tauri::command]
+fn lsp_start(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    c.lsp.ensure(&c)?;
+    let root = tauri::Url::from_directory_path(&c.ws).map_err(|_| "作業フォルダのURIを作れない")?;
+    Ok(json!({ "rootUri": root.as_str() }))
+}
+
+#[tauri::command]
+fn lsp_send(app: AppHandle, message: String) -> CmdResult {
+    core(&app).lsp.send(&message)?;
+    Ok(Value::Null)
+}
+
+/// コードエディタで開けるファイル(開いている作品の sketches/ と lib/ の .ts・.js・.fs・.glsl)
+const CODE_EXT: [&str; 5] = ["ts", "js", "fs", "glsl", "frag"];
+
+fn code_path(c: &Core, rel: &str) -> Result<std::path::PathBuf, String> {
+    let dir = c.work_dir()?;
+    let ok_ext = rel.rsplit_once('.').is_some_and(|(_, e)| CODE_EXT.contains(&e));
+    if !ok_ext || !(rel.starts_with("sketches/") || rel.starts_with("lib/")) {
+        return Err(format!("{rel} はコードエディタで扱えない(sketches/ か lib/ の .ts・.js・.fs・.glsl)"));
+    }
+    workspace::safe_rel(&dir, rel).ok_or("作品の外は開けない".into())
+}
+
+#[tauri::command]
+fn code_files(app: AppHandle) -> CmdResult {
+    let c = core(&app);
+    let dir = c.work_dir()?;
+    let mut files: Vec<Value> = workspace::walk(&dir)
+        .into_iter()
+        .filter_map(|f| {
+            let rel = f.strip_prefix(&dir).ok()?.to_string_lossy().replace('\\', "/");
+            let ext = rel.rsplit_once('.')?.1.to_string();
+            ((rel.starts_with("sketches/") || rel.starts_with("lib/")) && CODE_EXT.contains(&ext.as_str()))
+                .then(|| json!({ "rel": rel, "uri": tauri::Url::from_file_path(&f).map(|u| u.to_string()).unwrap_or_default() }))
+        })
+        .collect();
+    files.sort_by(|a, b| a["rel"].as_str().cmp(&b["rel"].as_str()));
+    Ok(json!({ "files": files }))
+}
+
+#[tauri::command]
+fn code_read(app: AppHandle, rel: String) -> CmdResult {
+    let c = core(&app);
+    let p = code_path(&c, &rel)?;
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("{rel}: {e}"))?;
+    Ok(json!({ "text": text, "uri": tauri::Url::from_file_path(&p).map(|u| u.to_string()).unwrap_or_default() }))
+}
+
+/// コードを保存する(保存するとファイル監視でホットリロードされ、5秒止まったら履歴にコミットされる)
+#[tauri::command]
+fn code_write(app: AppHandle, rel: String, text: String) -> CmdResult {
+    let c = core(&app);
+    let p = code_path(&c, &rel)?;
+    std::fs::write(&p, text).map_err(|e| format!("{rel}: {e}"))?;
+    Ok(Value::Null)
 }
 
 /// レンダーキューに積む(複数の仕様をまとめて積める)
@@ -358,6 +420,11 @@ fn main() {
             measure_loudness,
             render_stills,
             relink_pick,
+            lsp_start,
+            lsp_send,
+            code_files,
+            code_read,
+            code_write,
             edit_project,
             undo,
             redo,
@@ -444,6 +511,7 @@ fn main() {
             // 正常に終わるときは異常終了の印を消す
             if let tauri::RunEvent::Exit = ev {
                 if let Some(c) = app.try_state::<Arc<Core>>() {
+                    c.lsp.stop();
                     session::clean_exit(&c);
                 }
             }

@@ -50,6 +50,8 @@ pub struct Core {
     /// レンダーキュー(queue.rs)
     pub queue: Mutex<Vec<crate::queue::Item>>,
     pub queue_running: AtomicBool,
+    /// コードエディタ用の言語サーバー(lsp.rs)
+    pub lsp: crate::lsp::Lsp,
     pub player: Arc<crate::player::Player>,
     pub editor: crate::edit::Editor,
     pub live: crate::midi_live::LiveMidi,
@@ -93,6 +95,7 @@ impl Core {
             jobs: Default::default(),
             queue: Default::default(),
             queue_running: AtomicBool::new(false),
+            lsp: Default::default(),
             player: crate::player::Player::start(),
             editor: Default::default(),
             live: Default::default(),
