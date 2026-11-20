@@ -26,7 +26,8 @@ export type Params<P extends Record<string, ParamDecl>> = { [K in keyof P]: Para
 
 /**
  * pure: 時刻tの関数(任意の時刻へ即シークでき、順不同に描いても同じ結果)
- * stateful: simulateやフィードバックで状態を持つ(フェーズ4)
+ * stateful: simulate で状態を1フレームずつ進める(粒子・物理・前フレームの結果を使う表現)。
+ *   アプリが一定フレームごとに状態を複製して保存点にし、シークでは直前の保存点から計算し直す
  * sequential: 仮想時計で動かす既存コード。宣言がない場合はこれ
  */
 export type Mode = "pure" | "stateful" | "sequential";
@@ -203,6 +204,24 @@ export interface DrawContext<R extends RendererKind, P extends Record<string, Pa
   inputs: { layer(id: string): HTMLCanvasElement | null };
 }
 
+/** simulate が受け取るもの(そのフレームのレイヤー時刻での値) */
+export interface SimulateContext<P extends Record<string, ParamDecl>, T extends Record<string, TrackDecl> = {}> {
+  /** これから進めるフレームの時刻(秒)と番号 */
+  t: number;
+  frame: number;
+  /** 1フレームの秒数 */
+  dt: number;
+  width: number;
+  height: number;
+  p: Params<P>;
+  /** シードとフレーム番号で初期化した乱数 */
+  rand: Rand;
+  tracks: Tracks<T>;
+  events: Events;
+  section(name: string, t: number): number;
+  beats(t: number): number;
+}
+
 export interface SketchDef<R extends RendererKind, P extends Record<string, ParamDecl>, S, T extends Record<string, TrackDecl> = {}> {
   mode?: Mode;
   renderer?: R;
@@ -211,7 +230,12 @@ export interface SketchDef<R extends RendererKind, P extends Record<string, Para
   tracks?: T;
   /** 読み込み時とコード変更時に1回。戻り値は draw の第2引数に渡る */
   setup?(ctx: SetupContext<R, P>): S | Promise<S>;
-  /** フレームごと。p5では g が p5 インスタンス(noLoopとredrawで駆動される) */
+  /**
+   * mode "stateful" のとき、状態を1フレーム進める(フレーム0から順に1回ずつ呼ばれる)。
+   * state を書き換えるか、新しい状態を返す。状態は複製できるデータ(オブジェクト・配列・型付き配列・Map・Set)にする
+   */
+  simulate?(state: S, ctx: SimulateContext<P, T>): S | void;
+  /** フレームごと。p5では g が p5 インスタンス(noLoopとredrawで駆動される)。stateful では state を読むだけにする */
   draw(ctx: DrawContext<R, P, T>, state: S): void | Promise<void>;
   /** ホットリロード前と終了時。イベントやGPU資源を解放する */
   dispose?(state: S): void;

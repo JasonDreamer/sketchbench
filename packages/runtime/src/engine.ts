@@ -62,7 +62,29 @@ interface Loaded {
   flags: { allTracks: boolean; usesInputs: boolean };
   /** tracks の中身全体のハッシュ(all() を使うスケッチのキー) */
   tracksHash: string;
+  /** 読み込みに使った情報(逐次スケッチを先頭からやり直すときに使う) */
+  info: LayerInfo;
+  /** project.json の params のハッシュ(保存点とキャッシュのキー) */
+  paramsHash: string;
+  /** stateful: setup が返した最初の状態の複製と、保存点 */
+  sim: SimState | null;
+  /** sequential: 最後に描いたレイヤーのフレーム(-1 はまだ描いていない) */
+  seqFrame: number;
 }
+
+/** stateful の保存点。frame は状態がどのフレームまで進んだか(-1 は setup の直後) */
+interface SimState {
+  key: string;
+  frame: number;
+  saves: Map<number, unknown>;
+  /** 保存点1つのおおよそのバイト数と、保存する間隔(フレーム) */
+  bytes: number;
+  interval: number;
+}
+
+/** 保存点の既定の間隔(秒)と、スケッチごとのメモリの上限 */
+const SAVE_EVERY_SEC = 2;
+const SAVE_BUDGET = 256 * 1024 * 1024;
 
 export class Engine {
   project!: ProjectInfo;
@@ -183,6 +205,8 @@ export class Engine {
         cur.clock.set(settings, this.fps, p.duration);
         cur.tracks = this.bindTracks(makeTracks(cur.def.tracks, info.tracks, this.fps), cur.clock, cur.flags);
         cur.tracksHash = hashText(JSON.stringify(info.tracks ?? null));
+        cur.paramsHash = hashText(JSON.stringify(info.params ?? null));
+        cur.info = info;
         continue;
       }
       ok = (await this.loadLayer(info, cur)) && ok;
@@ -211,9 +235,89 @@ export class Engine {
     return JSON.stringify(Object.keys(l.tracks).map((k) => l.tracks[k].at(t)));
   }
 
-  /** 先に描いておく(プレビューで止まっているとき)。全レイヤーが pure のときだけ。描けたら true */
+  private modeOf(l: Loaded): "pure" | "stateful" | "sequential" {
+    const m = l.def.mode ?? "sequential";
+    // 状態を複製できない stateful は、逐次と同じく先頭から描き直す
+    if (m === "stateful" && !l.sim) return "sequential";
+    return m;
+  }
+
+  /** stateful: 状態をレイヤーのフレーム F まで進める(直前の保存点か今の状態から、近いほうで) */
+  private async advanceSim(l: Loaded, id: string, F: number) {
+    const sim = l.sim!;
+    const key = `${l.gen}|${l.paramsHash}|${l.tracksHash}|${this.globalKey}`;
+    if (sim.key !== key) {
+      // 入力が変わったら保存点を全部捨てて、setup 直後の状態からやり直す
+      const first = sim.saves.get(-1);
+      sim.saves = new Map([[-1, first]]);
+      sim.key = key;
+      sim.frame = Infinity;
+    }
+    let best = -1;
+    for (const f of sim.saves.keys()) if (f <= F && f > best) best = f;
+    if (sim.frame > F || best > sim.frame) {
+      l.state = structuredClone(sim.saves.get(best));
+      sim.frame = best;
+    }
+    const fps = this.fps;
+    for (let f = sim.frame + 1; f <= F; f++) {
+      const t = f / fps;
+      const toWork = l.clock.toWork;
+      seed(this.project.seed ?? 0, f);
+      const p = this.paramsAt(id, evalParams(l.params, l.types, f), toWork(t));
+      const ctx = {
+        t, frame: f, dt: 1 / fps, width: l.renderer.canvas.width, height: l.renderer.canvas.height, p, rand, tracks: l.tracks,
+        events: bindTime(this.events, TIME_ARGS.events, toWork), section: (name: string, x: number) => this.section(name, toWork(x)), beats: (x: number) => this.beats(toWork(x)),
+      };
+      const r = l.def.simulate?.(l.state, ctx);
+      if (r !== undefined) l.state = r;
+      sim.frame = f;
+      if (f % sim.interval === 0 && !sim.saves.has(f)) this.save(l, f);
+    }
+  }
+
+  private save(l: Loaded, f: number) {
+    const sim = l.sim!;
+    sim.saves.set(f, structuredClone(l.state));
+    if (!sim.bytes) sim.bytes = sizeOf(l.state);
+    // 上限を超えたら間隔を倍にして、間の保存点を捨てる
+    while ((sim.saves.size - 1) * sim.bytes > SAVE_BUDGET && sim.interval < 1e6) {
+      sim.interval *= 2;
+      for (const k of [...sim.saves.keys()]) if (k >= 0 && k % sim.interval !== 0) sim.saves.delete(k);
+    }
+  }
+
+  /** sequential: 先頭からやり直す(setup をもう一度呼び、canvas も作り直す) */
+  private async restart(id: string) {
+    const l = this.layers.get(id);
+    if (!l) return;
+    await this.loadLayer(l.info, l, true);
+  }
+
+  /** sequential: レイヤーのフレーム f を描く(追いつくための途中のフレーム。合成はしない) */
+  private async drawSequential(l: Loaded, id: string, f: number) {
+    const t = f / this.fps;
+    const toWork = l.clock.toWork;
+    advanceTo(toWork(t) * 1000);
+    seed(this.project.seed ?? 0, f);
+    const p = this.paramsAt(id, evalParams(l.params, l.types, f), toWork(t));
+    const ctx = {
+      g: l.renderer.g, t, frame: f, width: l.renderer.canvas.width, height: l.renderer.canvas.height, p, rand, canvas: l.renderer.canvas,
+      events: bindTime(this.events, TIME_ARGS.events, toWork), section: (name: string, x: number) => this.section(name, toWork(x)), beats: (x: number) => this.beats(toWork(x)),
+      markers: this.markers, tracks: l.tracks, inputs: { layer: () => null },
+    };
+    try {
+      await l.renderer.frame(() => l.def.draw(ctx, l.state));
+    } catch (e) {
+      if (l.failedAt < 0) log("error", `draw で例外(frame ${f}): ${errorText(e)}`);
+      l.failedAt = f;
+    }
+    l.seqFrame = f;
+  }
+
+  /** 先に描いておく(プレビューで止まっているとき)。全レイヤーが pure か stateful のときだけ。描けたら true */
   async prerender(frame: number): Promise<boolean> {
-    if (!this.cache || this.order.some((id) => (this.layers.get(id)?.def.mode ?? "sequential") !== "pure")) return false;
+    if (!this.cache || this.order.some((id) => { const l = this.layers.get(id); return !l || this.modeOf(l) === "sequential"; })) return false;
     await this.compose(frame, frame, false);
     return true;
   }
@@ -237,7 +341,8 @@ export class Engine {
     this.inputSources.delete(id);
   }
 
-  private async loadLayer(info: LayerInfo, prev: Loaded | undefined): Promise<boolean> {
+  /** fresh: canvas を使い回さず、ログも出さない(逐次スケッチを先頭からやり直すとき) */
+  private async loadLayer(info: LayerInfo, prev: Loaded | undefined, fresh = false): Promise<boolean> {
     const settings = this.settingsOf(info.id);
     const res = resolutionOf(settings);
     const w = Math.max(1, Math.round(this.project.width * res)), h = Math.max(1, Math.round(this.project.height * res));
@@ -263,7 +368,7 @@ export class Engine {
         if (!def || typeof def.draw !== "function") throw new Error(`${info.sketch}: default export に defineSketch({ draw }) がない`);
         const kind = def.renderer ?? "canvas2d";
         // rendererの種類が同じならcanvasとコンテキストを使い回す
-        const reuse = prev && prev.renderer.kind === kind && kind !== "p5" && prev.renderer.canvas.width === w && prev.renderer.canvas.height === h;
+        const reuse = !fresh && prev && prev.renderer.kind === kind && kind !== "p5" && prev.renderer.canvas.width === w && prev.renderer.canvas.height === h;
         renderer = reuse ? prev!.renderer : await createRenderer(kind, w, h, this.host);
       }
       const { entries: params, types } = resolveParams(def, info.params);
@@ -284,16 +389,26 @@ export class Engine {
         if (prev.renderer !== renderer) prev.renderer.dispose();
       }
       const flags = { allTracks: false, usesInputs: false };
+      // stateful: setup 直後の状態を保存点 -1 にする。複製できなければ逐次と同じ扱い
+      let sim: SimState | null = null;
+      if (def.mode === "stateful") {
+        try {
+          sim = { key: "", frame: -1, saves: new Map([[-1, structuredClone(state)]]), bytes: 0, interval: Math.max(1, Math.round(SAVE_EVERY_SEC * this.fps)) };
+        } catch (e) {
+          log("error", `${info.sketch}: stateful の状態を複製できない(関数やクラスのインスタンスを入れず、オブジェクト・配列・型付き配列で持つ)。先頭から描き直す扱いにする。${errorText(e)}`);
+        }
+        if (sim && typeof def.simulate !== "function") log("warn", `${info.sketch}: mode が stateful なのに simulate がない`);
+      }
       this.layers.set(info.id, {
         url: info.url!, def, renderer, state, params, types, tracks: this.bindTracks(makeTracks(def.tracks, info.tracks, this.fps), clock, flags), failedAt: -1, clock, settings, resolution: res,
-        gen: ++this.gen, flags, tracksHash: hashText(JSON.stringify(info.tracks ?? null)),
+        gen: ++this.gen, flags, tracksHash: hashText(JSON.stringify(info.tracks ?? null)), info, paramsHash: hashText(JSON.stringify(info.params ?? null)), sim, seqFrame: -1,
       });
       this.cache?.dropLayer(info.id);
       this.inputSources.delete(info.id);
       post(`/declare?work=${encodeURIComponent(work)}&sketch=${encodeURIComponent(info.sketch)}`, JSON.stringify({
         mode: def.mode ?? "sequential", renderer: def.renderer ?? (info.kind === "isf" ? "shader" : "canvas2d"), params: declaredParams(def), tracks: def.tracks ?? null,
       })).catch(() => {});
-      log("info", `${info.sketch} を読み込んだ`);
+      if (!fresh) log("info", `${info.sketch} を読み込んだ`);
       return true;
     } catch (e) {
       const detail = e instanceof DiagnosticError ? e.message : errorText(e);
@@ -351,6 +466,19 @@ export class Engine {
    * composite=false は先描き(キャッシュに入れるだけで重ねない)
    */
   private async compose(frame: number, sub: number, composite = true) {
+    // 逐次スケッチは飛ばしたフレームを順に描いて追いつく。戻るときは先頭からやり直す(時計を進める前に済ませる)
+    if (sub === frame) {
+      for (const id of this.order) {
+        let l = this.layers.get(id);
+        if (!l || !l.clock.active(frame) || this.modeOf(l) !== "sequential") continue;
+        const F = Math.floor(l.clock.layerFrame(frame) + 1e-9);
+        if (F < l.seqFrame) {
+          await this.restart(id);
+          l = this.layers.get(id)!;
+        }
+        for (let f = Math.max(0, l.seqFrame + 1); f < F; f++) await this.drawSequential(l, id, f);
+      }
+    }
     const tw = sub / this.fps;
     advanceTo(tw * 1000);
     const { width, height } = this.project;
@@ -363,7 +491,8 @@ export class Engine {
     for (const id of this.order) {
       const l = this.layers.get(id);
       if (!l || !l.clock.active(frame)) continue;
-      const cacheable = !!this.cache && sub === frame && (l.def.mode ?? "sequential") === "pure" && !l.flags.usesInputs && !this.inputSources.has(id);
+      const mode = this.modeOf(l);
+      const cacheable = !!this.cache && sub === frame && mode !== "sequential" && !l.flags.usesInputs && !this.inputSources.has(id);
       const lf = l.clock.layerFrame(sub);
       // 乱数のシードとスケッチの frame はフレームの整数で(モーションブラーの中で粒がちらつかないように)
       const lframe = Math.floor(l.clock.layerFrame(frame) + 1e-9);
@@ -373,6 +502,8 @@ export class Engine {
       let key = "";
       if (cacheable) {
         key = `${id}|${l.gen}|${lf}|${lframe}|${JSON.stringify(p)}|${this.clipsKey(l, t)}|${this.globalKey}`;
+        // stateful は、それまでの入力全体(params とクリップ)でも結果が変わる
+        if (mode === "stateful") key += `|${l.paramsHash}|${l.tracksHash}`;
         const tex = this.cache!.get(key);
         if (tex) {
           textures.set(id, tex);
@@ -380,6 +511,13 @@ export class Engine {
           continue;
         }
       }
+      if (mode === "sequential" && lframe === l.seqFrame) {
+        // 同じフレームを2度描くと状態が進んでしまうので、描いてあるcanvasをそのまま使う
+        drawn.set(id, l.renderer.canvas);
+        complete = false;
+        continue;
+      }
+      if (mode === "stateful") await this.advanceSim(l, id, lframe);
       const toWork = l.clock.toWork;
       const inputs = {
         layer: (name: string): HTMLCanvasElement | null => {
@@ -410,6 +548,7 @@ export class Engine {
         if (l.failedAt < 0) log("error", `draw で例外(frame ${frame}): ${errorText(e)}`);
         l.failedAt = frame;
       }
+      if (mode === "sequential") l.seqFrame = lframe;
       drawn.set(id, l.renderer.canvas);
       if (cacheable && l.failedAt < 0 && !l.flags.usesInputs) {
         const c = l.renderer.canvas;
@@ -442,6 +581,22 @@ export class Engine {
   }
 
   private warned = new Set<string>();
+}
+
+/** 状態のおおよそのバイト数(保存点のメモリの見積もり) */
+function sizeOf(v: unknown, seen = new Set<unknown>()): number {
+  if (v === null || v === undefined) return 8;
+  if (typeof v === "number" || typeof v === "boolean") return 8;
+  if (typeof v === "string") return v.length * 2;
+  if (typeof v !== "object" || seen.has(v)) return 8;
+  seen.add(v);
+  if (ArrayBuffer.isView(v)) return v.byteLength;
+  if (v instanceof ArrayBuffer) return v.byteLength;
+  let n = 16;
+  if (v instanceof Map) for (const [k, x] of v) n += sizeOf(k, seen) + sizeOf(x, seen);
+  else if (v instanceof Set) for (const x of v) n += sizeOf(x, seen);
+  else for (const x of Object.values(v)) n += sizeOf(x, seen) + 8;
+  return n;
 }
 
 /** 変換エラー。スタックは要らないので message だけを持つ */
